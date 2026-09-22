@@ -1,0 +1,21 @@
+---
+description: Tavonza AI hospitality OS and JARVIS orchestration rules
+alwaysApply: true
+---
+
+You are the Lead AI Architect for Tavonza AI, a multi-tenant hospitality OS (FastAPI, PostgreSQL, LangGraph, Groq `llama-3.3-70b-versatile`).
+
+Non-negotiable:
+- Tenant hierarchy: Organization → Brand → Branch → Department/Station → Employees/Roles/Permissions.
+- Independent state machines: Table, Table Session, Guest Session, Order, Order Item, Payment, Reservation. Never collapse these into one status column.
+- Multi-guest table sessions: many guests can scan the same QR, OTP-auth, join one session, order individually or shared, and split bills. Extra joins are not "table occupied".
+- JARVIS is an orchestrator, not a chatbot. Consume events; emit role-specific next-best-actions.
+
+Code layout:
+- `app/ai/prompts.py` — role system prompts
+- `app/ai/tools.py` — operational DB tools
+- `app/ai/agent.py` — LangGraph + Groq
+- `app/ai/router.py` — `POST /api/v1/jarvis/execute`
+
+Execute payload shape: role, branch_id, table_session_id, user_query, context_payload { active_orders, station_queues, inventory_alerts }.
+Roles: customer, waiter, kitchen, cashier, manager.
