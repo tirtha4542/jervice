@@ -15,6 +15,8 @@ from typing import Any
 import httpx
 import streamlit as st
 
+from app.core.auth import create_access_token
+
 st.set_page_config(
     page_title="Tavonza AI — JARVIS Console",
     page_icon="🤖",
@@ -22,7 +24,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-ROLES = ["waiter", "kitchen", "manager", "customer", "cashier"]
+ROLES = ["waiter", "kitchen", "manager", "customer", "cashier", "owner"]
 PRIORITY_COLORS = {
     "critical": "#e74c3c",
     "high": "#e67e22",
@@ -45,14 +47,28 @@ def base_url() -> str:
     return st.session_state.get("api_base", "http://127.0.0.1:8000").rstrip("/")
 
 
-def call(method: str, path: str, body: dict[str, Any] | None = None, timeout: float = 90.0):
+def get_auth_headers() -> dict[str, str]:
+    headers = {}
+    token = st.session_state.get("jwt_token")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def call(
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    timeout: float = 90.0,
+):
     """Return (status_code | None, parsed_json_or_error_text)."""
     url = f"{base_url()}{path}"
+    headers = get_auth_headers()
     try:
         if method == "GET":
-            response = httpx.get(url, timeout=timeout)
+            response = httpx.get(url, headers=headers, timeout=timeout)
         else:
-            response = httpx.post(url, json=body, timeout=timeout)
+            response = httpx.post(url, headers=headers, json=body, timeout=timeout)
     except httpx.HTTPError as exc:
         return None, str(exc)
     try:
@@ -102,6 +118,18 @@ with st.sidebar:
     st.text_input("API base URL", value="http://127.0.0.1:8000", key="api_base")
     st.divider()
 
+    st.markdown("### 🔑 Authentication (JWT Layer)")
+    auth_role = st.selectbox("Auth Role", ROLES, index=2, key="auth_role")
+    auth_branch = st.number_input("Branch Scope ID", min_value=1, value=8, step=1, key="auth_branch")
+    
+    if st.button("Generate Test Bearer JWT"):
+        generated_token = create_access_token({"sub": 1, "role": auth_role, "branch_id": int(auth_branch)})
+        st.session_state["jwt_token"] = generated_token
+        st.success(f"JWT Token generated for {auth_role} (Branch #{auth_branch})")
+
+    st.text_area("Bearer JWT Token", key="jwt_token", height=70)
+    st.divider()
+
     health_status, health = call("GET", "/health", timeout=5)
     if health_status == 200:
         st.success(f"API online — {health.get('service', 'ok')}")
@@ -123,11 +151,11 @@ with st.sidebar:
         st.caption("Could not load /openapi.json")
 
     st.divider()
-    st.caption("Docs: [Swagger](#) · see `/docs` on the API host")
+    st.caption("Docs: `/docs` on the API host")
 
 
-tab_execute, tab_chat, tab_endpoints = st.tabs(
-    ["⚡ JARVIS Execute", "💬 OpenAI Chat", "🧭 Endpoints"]
+tab_execute, tab_stream, tab_chat, tab_endpoints = st.tabs(
+    ["⚡ JARVIS Execute", "🌊 SSE Stream", "💬 OpenAI Chat", "🧭 Endpoints"]
 )
 
 
@@ -140,9 +168,9 @@ with tab_execute:
     with st.form("execute_form"):
         col1, col2, col3 = st.columns(3)
         with col1:
-            role = st.selectbox("Role", ROLES, index=0)
+            role = st.selectbox("Role", ROLES, index=2)
         with col2:
-            branch_id = st.number_input("Branch ID", min_value=0, value=1, step=1)
+            branch_id = st.number_input("Branch ID", min_value=0, value=8, step=1)
         with col3:
             use_table = st.checkbox("Send table_session_id", value=False)
             table_session_id = (
@@ -159,7 +187,7 @@ with tab_execute:
         context_raw = st.text_area(
             "Context payload (JSON)",
             value=json.dumps(DEFAULT_CONTEXT, indent=2),
-            height=220,
+            height=200,
         )
         submitted = st.form_submit_button("Run JARVIS", type="primary", width="stretch")
 
@@ -202,7 +230,51 @@ with tab_execute:
 
 
 # --------------------------------------------------------------------------- #
-# Tab 2 — OpenAI-compatible chat
+# Tab 2 — SSE Stream route
+# --------------------------------------------------------------------------- #
+with tab_stream:
+    st.markdown("`POST /api/v1/jarvis/stream` (Server-Sent Events)")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        s_role = st.selectbox("Role", ROLES, index=2, key="s_role")
+    with col2:
+        s_branch = st.number_input("Branch ID", min_value=1, value=8, step=1, key="s_branch")
+
+    s_query = st.text_input("User query", value="Stream live operational brief.", key="s_query")
+
+    if st.button("Start SSE Stream", type="primary"):
+        url = f"{base_url()}/api/v1/jarvis/stream"
+        headers = get_auth_headers()
+        payload = {
+            "role": s_role,
+            "branch_id": int(s_branch),
+            "user_query": s_query,
+            "context_payload": {},
+        }
+        
+        container = st.empty()
+        events_log = []
+        try:
+            with httpx.stream("POST", url, headers=headers, json=payload, timeout=30.0) as response:
+                for line in response.iter_lines():
+                    if line.startswith("data: "):
+                        raw_data = line[6:]
+                        if raw_data == "[DONE]":
+                            events_log.append("✅ Stream Finished ([DONE])")
+                            break
+                        try:
+                            evt = json.loads(raw_data)
+                            events_log.append(f"Event `{evt.get('event')}`: {json.dumps(evt)}")
+                        except Exception:
+                            events_log.append(raw_data)
+                        container.code("\n".join(events_log), language="json")
+        except Exception as exc:
+            st.error(f"Stream error: {exc}")
+
+
+# --------------------------------------------------------------------------- #
+# Tab 3 — OpenAI-compatible chat
 # --------------------------------------------------------------------------- #
 with tab_chat:
     st.markdown("`POST /v1/chat/completions`")
@@ -220,7 +292,7 @@ with tab_chat:
     with col2:
         chat_role = st.selectbox("JARVIS role", ROLES, index=0, key="chat_role")
     with col3:
-        chat_branch = st.number_input("Branch ID", min_value=0, value=1, step=1, key="chat_branch")
+        chat_branch = st.number_input("Branch ID", min_value=0, value=8, step=1, key="chat_branch")
 
     with st.expander("Context payload (JSON)"):
         chat_context_raw = st.text_area(
@@ -271,7 +343,7 @@ with tab_chat:
 
 
 # --------------------------------------------------------------------------- #
-# Tab 3 — route reference
+# Tab 4 — route reference
 # --------------------------------------------------------------------------- #
 with tab_endpoints:
     if spec_status == 200 and isinstance(spec, dict):

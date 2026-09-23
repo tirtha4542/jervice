@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.redis import cache_client
 from app.models import (
     DiningTable,
     GuestSession,
@@ -24,6 +25,11 @@ from app.models import (
 
 
 async def get_table_session_state(db: AsyncSession, table_session_id: int) -> dict[str, Any]:
+    cache_key = f"table_session:{table_session_id}"
+    cached = await cache_client.get(cache_key)
+    if cached is not None:
+        return cached
+
     result = await db.execute(
         select(TableSession)
         .options(
@@ -35,7 +41,9 @@ async def get_table_session_state(db: AsyncSession, table_session_id: int) -> di
     )
     session = result.scalar_one_or_none()
     if session is None:
-        return {"found": False, "table_session_id": table_session_id}
+        res = {"found": False, "table_session_id": table_session_id}
+        await cache_client.set(cache_key, res, ttl_seconds=10)
+        return res
 
     guests = [
         {
@@ -47,7 +55,7 @@ async def get_table_session_state(db: AsyncSession, table_session_id: int) -> di
         }
         for g in session.guests
     ]
-    return {
+    data = {
         "found": True,
         "table_session_id": session.id,
         "table_session_status": session.status,
@@ -59,9 +67,16 @@ async def get_table_session_state(db: AsyncSession, table_session_id: int) -> di
         "multi_guest_join_allowed": True,
         "note": "Additional QR joins attach to this table session; they do not occupy the table twice.",
     }
+    await cache_client.set(cache_key, data, ttl_seconds=10)
+    return data
 
 
 async def get_active_orders(db: AsyncSession, branch_id: int, table_session_id: int | None) -> list[dict[str, Any]]:
+    cache_key = f"active_orders:{branch_id}:{table_session_id}"
+    cached = await cache_client.get(cache_key)
+    if cached is not None:
+        return cached
+
     stmt = (
         select(Order)
         .join(TableSession, Order.table_session_id == TableSession.id)
@@ -104,10 +119,16 @@ async def get_active_orders(db: AsyncSession, branch_id: int, table_session_id: 
                 ],
             }
         )
+    await cache_client.set(cache_key, payload, ttl_seconds=5)
     return payload
 
 
 async def get_station_queues(db: AsyncSession, branch_id: int) -> dict[str, Any]:
+    cache_key = f"station_queues:{branch_id}"
+    cached = await cache_client.get(cache_key)
+    if cached is not None:
+        return cached
+
     result = await db.execute(
         select(OrderItem, Order, TableSession)
         .join(Order, OrderItem.order_id == Order.id)
@@ -128,10 +149,17 @@ async def get_station_queues(db: AsyncSession, branch_id: int) -> dict[str, Any]
                 "quantity": item.quantity,
             }
         )
-    return {station: tickets for station, tickets in queues.items()}
+    data = {station: tickets for station, tickets in queues.items()}
+    await cache_client.set(cache_key, data, ttl_seconds=5)
+    return data
 
 
 async def check_recipe_bom_inventory(db: AsyncSession, branch_id: int) -> list[dict[str, Any]]:
+    cache_key = f"bom_inventory:{branch_id}"
+    cached = await cache_client.get(cache_key)
+    if cached is not None:
+        return cached
+
     result = await db.execute(
         select(RecipeComponent, InventorySku)
         .join(InventorySku, RecipeComponent.sku_id == InventorySku.id)
@@ -155,6 +183,7 @@ async def check_recipe_bom_inventory(db: AsyncSession, branch_id: int) -> list[d
                     "severity": "critical" if insufficient_for_one else "warning",
                 }
             )
+    await cache_client.set(cache_key, alerts, ttl_seconds=15)
     return alerts
 
 

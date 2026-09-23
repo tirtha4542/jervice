@@ -9,8 +9,11 @@ class Settings(BaseSettings):
     app_env: str = "development"
     database_url: str = "postgresql+asyncpg://tavonza:tavonza@localhost:5432/tavonza"
     groq_api_key: str = ""
-    groq_model: str = "openai/gpt-oss-120b"
+    groq_model: str = "llama-3.3-70b-versatile"
     jarvis_temperature: float = 0.2
+    jwt_secret: str = "tavonza-dev-secret-key-change-in-production"
+    jwt_algorithm: str = "HS256"
+    redis_url: str = "redis://localhost:6379/0"
 
     @field_validator("database_url", mode="before")
     @classmethod

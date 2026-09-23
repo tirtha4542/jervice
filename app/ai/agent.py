@@ -1,4 +1,7 @@
-"""LangGraph JARVIS orchestrator with Groq (llama-3.3-70b-versatile)."""
+"""LangGraph JARVIS orchestrator with Groq (llama-3.3-70b-versatile).
+
+Supports dynamic tool pruning, actor context resolution, and multi-step reasoning.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +15,8 @@ from langgraph.graph import END, START, StateGraph
 
 from app.ai.prompts import system_prompt_for
 from app.ai.schemas import JarvisExecuteRequest, JarvisExecuteResponse, JarvisRecommendation, JarvisRole
+from app.ai.tool_gateway import get_pruned_tool_schemas
+from app.core.auth import ActorContext, resolve_role_permissions
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -23,6 +28,7 @@ class JarvisState(TypedDict):
     table_session_id: int | None
     user_query: str
     operational_context: dict[str, Any]
+    pruned_tools: list[dict[str, Any]]
     system_prompt: str
     raw_model_output: str
     summary: str
@@ -57,11 +63,13 @@ def infer(state: JarvisState) -> JarvisState:
             }
         ],
     }
+    pruned_tool_names = [t.get("name") for t in state.get("pruned_tools", [])]
     human = (
         f"Branch ID: {state['branch_id']}\n"
         f"Table session ID: {state['table_session_id']}\n"
         f"Role: {state['role']}\n"
-        f"User query: {state['user_query']}\n\n"
+        f"User query: {state['user_query']}\n"
+        f"Authorized tools for role: {json.dumps(pruned_tool_names)}\n\n"
         f"Operational context JSON:\n{json.dumps(state['operational_context'], default=str)}\n\n"
         f"Respond with JSON only matching:\n{json.dumps(schema_hint)}"
     )
@@ -184,10 +192,23 @@ def heuristic_fallback(request: JarvisExecuteRequest, context: dict[str, Any]) -
     )
 
 
-async def run_jarvis(request: JarvisExecuteRequest, operational_context: dict[str, Any]) -> JarvisExecuteResponse:
+async def run_jarvis(
+    request: JarvisExecuteRequest,
+    operational_context: dict[str, Any],
+    actor: ActorContext | None = None,
+) -> JarvisExecuteResponse:
+    if actor is None:
+        actor = ActorContext(
+            role=request.role,
+            branch_id=request.branch_id,
+            table_session_id=request.table_session_id,
+            permissions=resolve_role_permissions(request.role),
+        )
+
     if not settings.groq_api_key:
         return heuristic_fallback(request, operational_context)
 
+    pruned_tools = get_pruned_tool_schemas(actor)
     graph = get_graph()
     try:
         result = await graph.ainvoke(
@@ -197,6 +218,7 @@ async def run_jarvis(request: JarvisExecuteRequest, operational_context: dict[st
                 "table_session_id": request.table_session_id,
                 "user_query": request.user_query,
                 "operational_context": operational_context,
+                "pruned_tools": pruned_tools,
                 "system_prompt": "",
                 "raw_model_output": "",
                 "summary": "",
