@@ -2,6 +2,7 @@
 
 Validates actor permissions, injects scope boundaries (branch_id, org_id),
 and executes domain tools safely with audit logging.
+Strictly read-only for AI tools: AI agents inspect state but do not mutate database tables directly.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.ai.tools import (
     check_recipe_bom_inventory,
     get_active_orders,
+    get_branch_inventory,
     get_payment_split_view,
     get_reservations,
     get_station_queues,
@@ -31,6 +33,7 @@ TOOL_EXECUTORS: dict[str, Callable[..., Any]] = {
     "get_active_orders": get_active_orders,
     "get_station_queues": get_station_queues,
     "check_recipe_bom_inventory": check_recipe_bom_inventory,
+    "get_branch_inventory": get_branch_inventory,
     "get_payment_split_view": get_payment_split_view,
     "get_reservations": get_reservations,
 }
@@ -70,6 +73,15 @@ AVAILABLE_TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "name": "check_recipe_bom_inventory",
         "description": "Check recipe components and inventory SKU par levels for bottlenecks.",
+        "parameters": {
+            "type": "object",
+            "properties": {"branch_id": {"type": "integer"}},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_branch_inventory",
+        "description": "Fetch all inventory SKUs, codes, and on-hand quantities for the branch.",
         "parameters": {
             "type": "object",
             "properties": {"branch_id": {"type": "integer"}},
@@ -133,7 +145,7 @@ async def execute_tool_secured(
 
     # 2. Scope Injection (Override arguments with actor's enforced branch_id & org_id)
     injected_args = dict(raw_args)
-    if "branch_id" in injected_args or tool_name in ("get_active_orders", "get_station_queues", "check_recipe_bom_inventory", "get_reservations"):
+    if "branch_id" in injected_args or tool_name in ("get_active_orders", "get_station_queues", "check_recipe_bom_inventory", "get_branch_inventory", "get_reservations"):
         injected_args["branch_id"] = actor.branch_id
 
     if actor.table_session_id and "table_session_id" not in injected_args:
@@ -150,7 +162,7 @@ async def execute_tool_secured(
                 branch_id=actor.branch_id,
                 table_session_id=injected_args.get("table_session_id") or actor.table_session_id,
             )
-        elif tool_name in ("get_station_queues", "check_recipe_bom_inventory"):
+        elif tool_name in ("get_station_queues", "check_recipe_bom_inventory", "get_branch_inventory"):
             result = await executor(db, branch_id=actor.branch_id)
         elif tool_name == "get_reservations":
             result = await executor(db, branch_id=actor.branch_id)
@@ -175,4 +187,3 @@ async def execute_tool_secured(
             branch_id=actor.branch_id,
         )
         return {"error": str(exc), "status": "error"}
-

@@ -15,6 +15,7 @@ TOOL_PERMISSION_MAP: dict[str, str] = {
     "get_active_orders": "orders.read",
     "get_station_queues": "kitchen.queue.read",
     "check_recipe_bom_inventory": "inventory.read",
+    "get_branch_inventory": "inventory.read",
     "get_payment_split_view": "payments.read",
     "get_reservations": "tables.read",
     "get_branch_summary": "reports.read",
@@ -47,4 +48,3 @@ def validate_scope_access(actor: ActorContext, requested_branch_id: int) -> bool
         return True
     # Branch scope match check
     return actor.branch_id == requested_branch_id
-

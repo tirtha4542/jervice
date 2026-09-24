@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.audit import record_audit
 from app.core.redis import cache_client
 from app.models import (
     DiningTable,
@@ -187,6 +188,32 @@ async def check_recipe_bom_inventory(db: AsyncSession, branch_id: int) -> list[d
     return alerts
 
 
+async def get_branch_inventory(db: AsyncSession, branch_id: int) -> list[dict[str, Any]]:
+    """Retrieve all inventory SKUs and on-hand quantities for a branch."""
+    cache_key = f"branch_inventory:{branch_id}"
+    cached = await cache_client.get(cache_key)
+    if cached is not None:
+        return cached
+
+    result = await db.execute(
+        select(InventorySku).where(InventorySku.branch_id == branch_id)
+    )
+    skus = result.scalars().all()
+    payload = [
+        {
+            "sku_id": s.id,
+            "sku_code": s.sku_code,
+            "name": s.name,
+            "on_hand": str(s.on_hand),
+            "par_level": str(s.par_level),
+            "unit": s.unit,
+        }
+        for s in skus
+    ]
+    await cache_client.set(cache_key, payload, ttl_seconds=15)
+    return payload
+
+
 async def get_payment_split_view(db: AsyncSession, table_session_id: int) -> dict[str, Any]:
     result = await db.execute(
         select(Payment, Order, GuestSession)
@@ -222,10 +249,7 @@ async def get_reservations(
     statuses: tuple[str, ...] | list[str] | None = None,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
-    """Reservations for a branch, oldest first.
-
-    Shared by the REST endpoint and the JARVIS tool layer so both see identical data.
-    """
+    """Reservations for a branch, oldest first."""
     stmt = select(Reservation).where(Reservation.branch_id == branch_id)
     if status is not None:
         stmt = stmt.where(Reservation.status == status)
@@ -253,6 +277,7 @@ def merge_context(
     orders: list[dict[str, Any]],
     queues: dict[str, Any],
     inventory_alerts: list[dict[str, Any]],
+    inventory_skus: list[dict[str, Any]] | None = None,
     payment_splits: dict[str, Any] | None,
     reservations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -260,6 +285,7 @@ def merge_context(
         "active_orders": request_context.get("active_orders") or orders,
         "station_queues": request_context.get("station_queues") or queues,
         "inventory_alerts": request_context.get("inventory_alerts") or inventory_alerts,
+        "inventory_skus": request_context.get("inventory_skus") or inventory_skus or [],
         "live_table_session": table_state,
         "payment_splits": payment_splits,
         "reservations": reservations or [],

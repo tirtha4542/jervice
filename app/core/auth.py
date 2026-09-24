@@ -61,14 +61,14 @@ def create_access_token(
     """Create a signed JWT token."""
     key = (secret or settings.jwt_secret).encode("utf-8")
     header = {"alg": algorithm, "typ": "JWT"}
-    
+
     header_b64 = _b64_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
     payload_b64 = _b64_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    
+
     signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
     signature = hmac.new(key, signing_input, hashlib.sha256).digest()
     sig_b64 = _b64_encode(signature)
-    
+
     return f"{header_b64}.{payload_b64}.{sig_b64}"
 
 
@@ -78,16 +78,16 @@ def decode_access_token(token: str, secret: str | None = None) -> dict[str, Any]
     parts = token.split(".")
     if len(parts) != 3:
         raise ValueError("Invalid JWT format")
-    
+
     header_b64, payload_b64, sig_b64 = parts
     signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-    
+
     expected_sig = hmac.new(key, signing_input, hashlib.sha256).digest()
     actual_sig = _b64_decode(sig_b64)
-    
+
     if not hmac.compare_digest(expected_sig, actual_sig):
         raise ValueError("Invalid JWT signature")
-    
+
     payload_bytes = _b64_decode(payload_b64)
     return json.loads(payload_bytes.decode("utf-8"))
 
@@ -148,32 +148,20 @@ def build_actor_context(claims: dict[str, Any]) -> ActorContext:
 
 async def get_actor_context(
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
-    x_user_role: str | None = Header(None, alias="X-User-Role"),
-    x_branch_id: int | None = Header(None, alias="X-Branch-ID"),
-    x_table_session_id: int | None = Header(None, alias="X-Table-Session-ID"),
 ) -> ActorContext:
-    """FastAPI dependency to extract and decode ActorContext from Bearer JWT or headers."""
+    """FastAPI dependency to extract and decode ActorContext from Bearer JWT."""
     if credentials and credentials.credentials:
         try:
             claims = decode_access_token(credentials.credentials)
             return build_actor_context(claims)
         except Exception as exc:
-            logger.warning("JWT validation failed (%s); falling back to header/default resolution", exc)
+            logger.warning("JWT validation failed: %s", exc)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"Invalid authentication token: {exc}",
             )
 
-    # Fallback resolution for headers / unauthenticated dev testing
-    role = x_user_role or "manager"
-    branch_id = x_branch_id if x_branch_id is not None else 8
-    perms = resolve_role_permissions(role)
-    return ActorContext(
-        user_id=1,
-        role=role,
-        org_id=1,
-        branch_id=branch_id,
-        table_session_id=x_table_session_id,
-        permissions=perms,
-        assigned_tables=[],
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication token required. Please provide a valid Bearer JWT token.",
     )

@@ -50,8 +50,8 @@ def base_url() -> str:
 def get_auth_headers() -> dict[str, str]:
     headers = {}
     token = st.session_state.get("jwt_token")
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if token and token.strip():
+        headers["Authorization"] = f"Bearer {token.strip()}"
     return headers
 
 
@@ -121,13 +121,13 @@ with st.sidebar:
     st.markdown("### 🔑 Authentication (JWT Layer)")
     auth_role = st.selectbox("Auth Role", ROLES, index=2, key="auth_role")
     auth_branch = st.number_input("Branch Scope ID", min_value=1, value=8, step=1, key="auth_branch")
-    
+
     if st.button("Generate Test Bearer JWT"):
         generated_token = create_access_token({"sub": 1, "role": auth_role, "branch_id": int(auth_branch)})
         st.session_state["jwt_token"] = generated_token
         st.success(f"JWT Token generated for {auth_role} (Branch #{auth_branch})")
 
-    st.text_area("Bearer JWT Token", key="jwt_token", height=70)
+    st.text_area("Bearer JWT Token", key="jwt_token", value="", height=70)
     st.divider()
 
     health_status, health = call("GET", "/health", timeout=5)
@@ -252,23 +252,26 @@ with tab_stream:
             "user_query": s_query,
             "context_payload": {},
         }
-        
+
         container = st.empty()
         events_log = []
         try:
             with httpx.stream("POST", url, headers=headers, json=payload, timeout=30.0) as response:
-                for line in response.iter_lines():
-                    if line.startswith("data: "):
-                        raw_data = line[6:]
-                        if raw_data == "[DONE]":
-                            events_log.append("✅ Stream Finished ([DONE])")
-                            break
-                        try:
-                            evt = json.loads(raw_data)
-                            events_log.append(f"Event `{evt.get('event')}`: {json.dumps(evt)}")
-                        except Exception:
-                            events_log.append(raw_data)
-                        container.code("\n".join(events_log), language="json")
+                if response.status_code != 200:
+                    st.error(f"HTTP {response.status_code}: {response.text}")
+                else:
+                    for line in response.iter_lines():
+                        if line.startswith("data: "):
+                            raw_data = line[6:]
+                            if raw_data == "[DONE]":
+                                events_log.append("✅ Stream Finished ([DONE])")
+                                break
+                            try:
+                                evt = json.loads(raw_data)
+                                events_log.append(f"Event `{evt.get('event')}`: {json.dumps(evt)}")
+                            except Exception:
+                                events_log.append(raw_data)
+                            container.code("\n".join(events_log), language="json")
         except Exception as exc:
             st.error(f"Stream error: {exc}")
 

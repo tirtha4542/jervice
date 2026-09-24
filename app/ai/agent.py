@@ -1,6 +1,7 @@
 """LangGraph JARVIS orchestrator with Groq (llama-3.3-70b-versatile).
 
 Supports dynamic tool pruning, actor context resolution, and multi-step reasoning.
+Strictly read-only: AI agents emit guidance/recommendations and do NOT mutate DB tables directly.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from typing import Any, TypedDict
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langgraph.graph import END, START, StateGraph
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.prompts import system_prompt_for
 from app.ai.schemas import JarvisExecuteRequest, JarvisExecuteResponse, JarvisRecommendation, JarvisRole
@@ -153,8 +155,8 @@ def heuristic_fallback(request: JarvisExecuteRequest, context: dict[str, Any]) -
                 title="Recipe BOM inventory bottleneck",
                 priority="critical",
                 audience_role=request.role,
-                action="86 or 86-soon items whose BOM SKUs cannot cover one more portion.",
-                rationale="Inventory is evaluated at recipe component level, not menu-item guesswork.",
+                action="Update inventory on hand stock via Web Frontend (PATCH /api/v1/inventory/{sku_id}/on-hand).",
+                rationale="Inventory is evaluated at recipe component level; stock updates must be triggered via Web Frontend.",
                 related_entities={"sku_codes": [a.get("sku_code") for a in critical]},
             )
         )
@@ -196,6 +198,7 @@ async def run_jarvis(
     request: JarvisExecuteRequest,
     operational_context: dict[str, Any],
     actor: ActorContext | None = None,
+    db: AsyncSession | None = None,
 ) -> JarvisExecuteResponse:
     if actor is None:
         actor = ActorContext(
@@ -228,6 +231,7 @@ async def run_jarvis(
     except Exception as exc:  # noqa: BLE001 - a Groq outage must not 500 the route
         logger.warning("Groq inference failed (%s); serving heuristic fallback.", exc)
         return heuristic_fallback(request, operational_context)
+
     recs = []
     for item in result.get("recommendations") or []:
         try:
@@ -237,6 +241,7 @@ async def run_jarvis(
     if not recs:
         fallback = heuristic_fallback(request, operational_context)
         recs = fallback.recommendations
+
     return JarvisExecuteResponse(
         role=request.role,
         branch_id=request.branch_id,
