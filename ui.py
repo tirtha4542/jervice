@@ -15,7 +15,6 @@ from typing import Any
 import httpx
 import streamlit as st
 
-from app.core.auth import create_access_token
 
 st.set_page_config(
     page_title="Tavonza AI — JARVIS Console",
@@ -122,12 +121,33 @@ with st.sidebar:
     auth_role = st.selectbox("Auth Role", ROLES, index=2, key="auth_role")
     auth_branch = st.number_input("Branch Scope ID", min_value=1, value=8, step=1, key="auth_branch")
 
-    if st.button("Generate Test Bearer JWT"):
-        generated_token = create_access_token({"sub": 1, "role": auth_role, "branch_id": int(auth_branch)})
-        st.session_state["jwt_token"] = generated_token
-        st.success(f"JWT Token generated for {auth_role} (Branch #{auth_branch})")
+    dev_bootstrap = st.text_input(
+        "Local DEV_AUTH_TOKEN",
+        type="password",
+        key="dev_bootstrap",
+        help="Configured only for local development; never paste this into a shared UI.",
+    )
+    if st.button("Request Local Test JWT"):
+        if not dev_bootstrap.strip():
+            st.error("Enter the local DEV_AUTH_TOKEN first.")
+        else:
+            try:
+                response = httpx.post(
+                    f"{base_url()}/api/v1/auth/dev-token",
+                    headers={"X-Dev-Bootstrap": dev_bootstrap.strip()},
+                    json={"sub": 1, "role": auth_role, "branch_id": int(auth_branch)},
+                    timeout=10.0,
+                )
+                if response.status_code == 200:
+                    st.session_state["jwt_token"] = response.json()["access_token"]
+                    st.success(f"Local JWT issued for {auth_role} (Branch #{auth_branch})")
+                else:
+                    st.error(f"Local auth returned HTTP {response.status_code}")
+            except httpx.HTTPError as exc:
+                st.error(f"Could not reach the local auth endpoint: {exc}")
 
     st.text_area("Bearer JWT Token", key="jwt_token", value="", height=70)
+    st.caption("Keep this console on localhost; the Node console is the preferred UI.")
     st.divider()
 
     health_status, health = call("GET", "/health", timeout=5)

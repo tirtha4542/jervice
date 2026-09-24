@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.auth import ActorContext, get_actor_context, require_branch_access, require_permission
 from app.core.database import get_db
 from app.models import Branch, Brand, Department, Employee, Organization, Role
 
@@ -46,11 +47,16 @@ class RoleOut(BaseModel):
 
 
 @router.get("/hierarchy")
-async def get_hierarchy(db: AsyncSession = Depends(get_db)) -> dict:
-    """Full tenant tree with departments nested under each branch."""
+async def get_hierarchy(
+    db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
+) -> dict:
+    """Tenant tree limited to the authenticated organization."""
+    require_permission(actor, "staff.read")
     orgs = (
         await db.execute(
             select(Organization)
+            .where(Organization.id == actor.org_id)
             .options(
                 selectinload(Organization.brands).selectinload(Brand.branches).selectinload(Branch.departments)
             )
@@ -76,6 +82,7 @@ async def get_hierarchy(db: AsyncSession = Depends(get_db)) -> dict:
                                 ],
                             }
                             for branch in brand.branches
+                            if actor.can_access_branch(branch.id)
                         ],
                     }
                     for brand in org.brands
@@ -90,10 +97,18 @@ async def get_hierarchy(db: AsyncSession = Depends(get_db)) -> dict:
 async def list_branches(
     brand_id: int | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> list[dict]:
-    stmt = select(Branch).options(selectinload(Branch.departments))
+    stmt = (
+        select(Branch)
+        .join(Brand, Branch.brand_id == Brand.id)
+        .where(Brand.organization_id == actor.org_id)
+        .options(selectinload(Branch.departments))
+    )
     if brand_id is not None:
         stmt = stmt.where(Branch.brand_id == brand_id)
+    if not actor.has_permission("admin.all"):
+        stmt = stmt.where(Branch.id == actor.branch_id)
     rows = (await db.execute(stmt.order_by(Branch.id.asc()))).scalars().unique().all()
     return [
         {
@@ -111,7 +126,11 @@ async def list_branches(
 
 
 @router.get("/roles", response_model=list[RoleOut])
-async def list_roles(db: AsyncSession = Depends(get_db)) -> list[RoleOut]:
+async def list_roles(
+    db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
+) -> list[RoleOut]:
+    require_permission(actor, "staff.read")
     rows = (await db.execute(select(Role).order_by(Role.id.asc()))).scalars().all()
     return rows
 
@@ -121,10 +140,15 @@ async def list_employees(
     branch_id: int | None = Query(default=None, description="Scope to one branch via its departments"),
     role_id: int | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> list[dict]:
+    require_permission(actor, "staff.read")
     stmt = (
         select(Employee)
         .join(Department, Employee.department_id == Department.id)
+        .join(Branch, Department.branch_id == Branch.id)
+        .join(Brand, Branch.brand_id == Brand.id)
+        .where(Brand.organization_id == actor.org_id)
         .options(selectinload(Employee.role), selectinload(Employee.department))
     )
     if branch_id is not None:

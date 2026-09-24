@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 venv/
 __pycache__/
@@ -10,5 +12,10 @@ __pycache__/
 dist/
 build/
 .idea/
-.vscode/
 *.log
+node_modules/
+web/.env
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

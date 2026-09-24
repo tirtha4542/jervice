@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import Decimal
+import secrets
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.state_machines import (
@@ -246,7 +247,7 @@ async def _seed_tenant(db: AsyncSession):
             DiningTable,
             {"branch_id": branch.id, "code": code},
             {
-                "qr_token": f"demo-{branch.id}-{code.lower()}",
+                "qr_token": f"qr_{secrets.token_urlsafe(24)}",
                 "status": TableStatus.AVAILABLE.value,
                 "capacity": capacity,
             },
@@ -585,6 +586,8 @@ async def _seed_audit(db: AsyncSession, branch) -> int:
 async def seed_all(db: AsyncSession) -> dict[str, Any]:
     """Fill every table. Safe to re-run: existing rows are reused, never
     duplicated, and never rewound to an earlier status."""
+    # Serialize concurrent demo seed requests for this PostgreSQL database.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('tavonza-demo-seed'))"))
     org, brand, branch, table_ids = await _seed_tenant(db)
     chart = await _seed_org_chart(db, branch)
     catalog = await _seed_catalog(db, branch)
@@ -620,7 +623,6 @@ async def seed_all(db: AsyncSession) -> dict[str, Any]:
         "audit_logs": audit_count,
         "next": [
             f"GET  /api/v1/dashboard/{branch.id}",
-            f"GET  /api/v1/data",
             f"GET  /api/v1/menu?branch_id={branch.id}",
             f"GET  /api/v1/orders?branch_id={branch.id}",
             f"GET  /api/v1/table-sessions/{service['table_session_id']}",

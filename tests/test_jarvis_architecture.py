@@ -87,30 +87,32 @@ async def test_cache_first_bootstrap():
 
 @pytest.mark.asyncio
 async def test_secured_tool_gateway_unauthorized_blocking():
-    mock_db = AsyncMock()
+    class FakeClient:
+        async def operational_context(self, **kwargs):
+            raise AssertionError("unauthorized tools must not call the backend")
+
     waiter_actor = ActorContext(
         user_id=1,
         role="waiter",
         branch_id=8,
         permissions=resolve_role_permissions("waiter"),
     )
-    # Attempting to run inventory check tool as waiter should fail with status 'denied'
     result = await execute_tool_secured(
-        mock_db,
+        FakeClient(),
         waiter_actor,
         tool_name="check_recipe_bom_inventory",
         raw_args={"branch_id": 999},
     )
     assert result["status"] == "denied"
-    assert "lacks permission" in result["error"]
+    assert "Permission denied" in result["error"]
 
 
 @pytest.mark.asyncio
 async def test_secured_tool_gateway_scope_injection():
-    mock_db = AsyncMock()
-    mock_result = MagicMock()
-    mock_result.all.return_value = []
-    mock_db.execute = AsyncMock(return_value=mock_result)
+    class FakeClient:
+        async def operational_context(self, *, branch_id, table_session_id=None):
+            assert branch_id == 8
+            return {"station_queues": {"kitchen": []}}
 
     manager_actor = ActorContext(
         user_id=2,
@@ -118,15 +120,14 @@ async def test_secured_tool_gateway_scope_injection():
         branch_id=8,
         permissions=resolve_role_permissions("manager"),
     )
-    # Manager executes station queues tool with raw_args branch_id=999
-    # Secured gateway must override with manager's branch_id=8
     result = await execute_tool_secured(
-        mock_db,
+        FakeClient(),
         manager_actor,
         tool_name="get_station_queues",
         raw_args={"branch_id": 999},
     )
     assert result["status"] == "success"
+    assert result["data"] == {"kitchen": []}
 
 
 @pytest.mark.asyncio
