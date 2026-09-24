@@ -1,14 +1,4 @@
-"""OpenAI-compatible facade so third-party chat clients can drive JARVIS.
-
-Implements the two endpoints every OpenAI-style client probes first:
-
-- ``GET  /v1/models``
-- ``POST /v1/chat/completions``
-
-JARVIS-specific inputs (``role``, ``branch_id``, ``table_session_id``,
-``context_payload``) are accepted as optional extra fields. Plain OpenAI
-clients omit them and receive manager-level defaults.
-"""
+"""Authenticated OpenAI-compatible facade for the local/cloud backend."""
 
 from __future__ import annotations
 
@@ -17,40 +7,48 @@ import uuid
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, Field, model_validator
 
 from app.ai.agent import run_jarvis
+from app.ai.backend_client import BackendRouteClient
 from app.ai.router import build_operational_context
 from app.ai.schemas import ContextPayload, JarvisExecuteRequest, JarvisExecuteResponse, JarvisRole
+from app.core.auth import ActorContext, get_actor_context, get_raw_bearer_token
 from app.core.config import settings
-from app.core.database import get_db
+from app.core.rate_limit import allow_event
 
 router = APIRouter(prefix="/v1", tags=["openai-compatible"])
-
 DEFAULT_QUERY = "Analyze current operational state."
 
 
 class ChatMessage(BaseModel):
     role: Literal["system", "developer", "user", "assistant", "tool"]
-    content: str = ""
+    content: str = Field(default="", max_length=settings.ai_max_query_length)
 
 
 class ChatCompletionRequest(BaseModel):
     model: str | None = None
-    messages: list[ChatMessage] = Field(min_length=1)
-    temperature: float | None = None
+    messages: list[ChatMessage] = Field(min_length=1, max_length=50)
+    temperature: float | None = Field(default=None, ge=0, le=2)
 
-    # JARVIS extensions — optional, so stock OpenAI clients still work.
-    role: JarvisRole = "manager"
-    branch_id: int = 1
-    table_session_id: int | None = None
+    # These fields remain for client compatibility, but the authenticated
+    # actor is authoritative for role and branch.
+    role: JarvisRole | None = None
+    branch_id: int | None = Field(default=None, ge=1)
+    table_session_id: int | None = Field(default=None, ge=1)
     context_payload: ContextPayload = Field(default_factory=ContextPayload)
+    session_id: str | None = Field(default=None, min_length=8, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+
+    @model_validator(mode="after")
+    def bound_total_content(self):
+        total = sum(len(message.content) for message in self.messages)
+        if total > 20_000:
+            raise ValueError("combined message content is too large")
+        return self
 
 
 @router.get("/models")
-async def list_models() -> dict[str, Any]:
-    """Advertise the configured model so client probes stop returning 404."""
+async def list_models(actor: ActorContext = Depends(get_actor_context)) -> dict[str, Any]:
     return {
         "object": "list",
         "data": [
@@ -67,17 +65,39 @@ async def list_models() -> dict[str, Any]:
 @router.post("/chat/completions")
 async def chat_completions(
     payload: ChatCompletionRequest,
-    db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
+    access_token: str = Depends(get_raw_bearer_token),
 ) -> dict[str, Any]:
+    role = payload.role or actor.role
+    if actor.role != "owner" and role != actor.role:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail="Requested role does not match authenticated role")
+    if actor.role == "owner" and role not in {"owner", "manager"}:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=403, detail="Owner may use owner or manager context")
+
     request = JarvisExecuteRequest(
-        role=payload.role,
-        branch_id=payload.branch_id,
+        role=role,
+        branch_id=actor.branch_id,
         table_session_id=payload.table_session_id,
         user_query=_user_query(payload),
         context_payload=payload.context_payload,
+        session_id=payload.session_id,
     )
-    operational_context = await build_operational_context(db, request)
-    jarvis = await run_jarvis(request, operational_context)
+    if not allow_event(f"openai:{actor.user_id}:{actor.branch_id}", limit=30, window_seconds=60):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=429, detail="Chat request limit exceeded; try again shortly")
+    client = BackendRouteClient(access_token=access_token)
+    operational_context = await build_operational_context(
+        request,
+        actor,
+        access_token,
+        client=client,
+    )
+    jarvis = await run_jarvis(request, operational_context, actor=actor)
     content = _render(jarvis)
 
     prompt_tokens = _approx_tokens(request.user_query)
@@ -92,6 +112,7 @@ async def chat_completions(
                 "index": 0,
                 "message": {"role": "assistant", "content": content},
                 "finish_reason": "stop",
+                "session_id": jarvis.session_id,
             }
         ],
         "usage": {
@@ -103,7 +124,6 @@ async def chat_completions(
 
 
 def _user_query(payload: ChatCompletionRequest) -> str:
-    """Last user message wins; fall back to the last message, then a default."""
     for message in reversed(payload.messages):
         if message.role == "user" and message.content.strip():
             return message.content.strip()
@@ -114,11 +134,9 @@ def _user_query(payload: ChatCompletionRequest) -> str:
 
 
 def _render(result: JarvisExecuteResponse) -> str:
-    """Chat clients display plain text, so format the briefing for reading."""
     lines = [result.summary.strip() or "No summary produced."]
     if result.recommendations:
-        lines.append("")
-        lines.append("Next-best-actions:")
+        lines.extend(["", "Next-best-actions:"])
         for index, rec in enumerate(result.recommendations, start=1):
             lines.append(f"{index}. [{rec.priority}] {rec.title}")
             lines.append(f"   Action: {rec.action}")

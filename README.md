@@ -125,8 +125,10 @@ python smoke.py                 # terminal 2 — 21 checks against live data
 | `POST` | `/api/v1/reservations` | Create — status always starts `requested` |
 | `PATCH` | `/api/v1/reservations/{id}/status` | Lifecycle move; illegal jumps → **409** |
 | `GET` | `/api/v1/dashboard/{branch_id}` | Floor, kitchen, money, stock, audit — one payload |
-| `POST` | `/api/v1/jarvis/execute` | JARVIS briefing with live tool context |
-| `GET` | `/v1/models` / `POST` | `/v1/chat/completions` | OpenAI-compatible facade |
+| `GET` | `/api/v1/operations/context` | Authenticated, role-filtered backend context consumed by AI |
+| `POST` | `/api/v1/jarvis/execute` | JARVIS briefing through backend routes |
+| `GET` | `/v1/models` | Authenticated model listing |
+| `POST` | `/v1/chat/completions` | Authenticated OpenAI-compatible facade |
 | `POST` | `/api/v1/demo/seed` | Dev-only full seed (403 in production) |
 
 Try-it-out order: `POST /api/v1/demo/seed` → `GET /api/v1/dashboard/8` → `GET /api/v1/menu?branch_id=8` → `POST /api/v1/jarvis/execute`. Example 409:
@@ -136,7 +138,46 @@ OrderStatus: draft -> ready is not allowed
 - allowed from 'draft': ['cancelled', 'submitted']
 ```
 
-`GET` reads share the same query tools that feed JARVIS, so the AI and the REST API always see identical data.
+`GET` reads share the same query services that feed JARVIS. The AI runtime now calls the authenticated backend operations route over HTTP rather than importing the database session.
+
+## Local AI console (HTML/CSS/JS + Node.js)
+
+A dependency-free Node.js console is available in `web/`. It serves the UI and proxies `/api`, `/v1`, `/health`, and `/ready` to FastAPI.
+
+```powershell
+# terminal 1
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# terminal 2
+cd web
+npm start
+```
+
+Open <http://127.0.0.1:3000>.
+
+For the local console, configure a separate `DEV_AUTH_TOKEN` in `.env`, then use **Connect → Local bootstrap**. The backend issues a short-lived JWT; the AI layer forwards that token to the protected backend routes. The AI package does not import the application database session for live context.
+
+If you prefer not to use the bootstrap form, generate a local token directly:
+
+```powershell
+python local_token.py --role manager --branch-id 8
+```
+
+Paste the printed token into the console. The helper never prints the signing secret.
+
+For the temporary QR test flow, set `ALLOW_TEST_QR=true` locally and check the confirmation box in the console. A real QR provider/OTP verifier can replace this branch later; set `ALLOW_REAL_QR=true` only after that provider is connected. The request already accepts a `qr_token` field. Existing predictable demo tokens can be rotated with `python rotate_qr_tokens.py --apply`.
+
+### Local environment additions
+
+```dotenv
+JWT_SECRET=use-a-long-random-local-secret
+DEV_AUTH_TOKEN=use-a-separate-local-bootstrap-secret
+ALLOW_TEST_QR=true
+ALLOW_REAL_QR=false
+BACKEND_API_URL=http://127.0.0.1:8000
+```
+
+Keep the console bound to localhost. Do not use the development bootstrap or QR checkbox in a shared deployment. Never commit `.env`; rotate any credential that has appeared in logs, backups, or Git objects.
 
 ## Run
 
@@ -144,18 +185,22 @@ OrderStatus: draft -> ready is not allowed
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env
-# set DATABASE_URL and GROQ_API_KEY
+copy .env.example .env  # first-time setup only; do not overwrite an existing .env
+# set DATABASE_URL, GROQ_API_KEY, JWT_SECRET, and DEV_AUTH_TOKEN
 python seed_db.py                # post the demo dataset
 uvicorn app.main:app --reload
 ```
 
 Health: `GET /health`
 
+## Local schema safety
+
+The SQLAlchemy models now include numeric checks and an active-session uniqueness index. For an existing local database, review and optionally apply `migrations/001_local_safety.sql` after taking a backup. The backend deployment should own its formal migration pipeline.
+
 ## Tests
 
 ```bash
-pytest                           # 32 tests — state machines + route contracts, no DB needed
+pytest                           # 53 tests — state machines + route contracts + AI route boundary
 ```
 
 With the API running, `python smoke.py` adds 21 live checks that read and write the real database.
@@ -167,7 +212,7 @@ uvicorn app.main:app --reload          # terminal 1 — API on :8000
 streamlit run ui.py                    # terminal 2 — UI on :8501
 ```
 
-Open http://localhost:8501 — three tabs:
+Open http://localhost:8501 — four tabs:
 
 | Tab | Exercises |
 | --- | --- |

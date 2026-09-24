@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,7 +10,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.tools import get_reservations
+from app.services.operations import get_reservations
+from app.core.config import settings
+from app.core.auth import (
+    ActorContext,
+    get_actor_context,
+    require_branch_access,
+    require_permission,
+)
 from app.core.database import get_db
 from app.domain.state_machines import InvalidStateTransition, ReservationStatus, apply_transition
 from app.models import Branch, DiningTable, Reservation
@@ -75,8 +82,11 @@ async def list_reservations(
     status: ReservationStatusValue | None = Query(default=None, description="Filter by lifecycle state"),
     limit: int = Query(default=50, ge=1, le=500),
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> list[dict]:
     """List reservations for a branch — uses the same query tool JARVIS reads."""
+    require_branch_access(actor, branch_id)
+    require_permission(actor, "tables.read")
     rows = await get_reservations(db, branch_id, status=status, limit=limit)
     return [_from_tool(item) for item in rows]
 
@@ -85,8 +95,11 @@ async def list_reservations(
 async def create_reservation(
     payload: ReservationCreate,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict:
     """Create a reservation. Status always starts at `requested` per the state machine."""
+    require_branch_access(actor, payload.branch_id)
+    require_permission(actor, "reservations.write")
     branch_exists = await db.scalar(select(Branch.id).where(Branch.id == payload.branch_id))
     if branch_exists is None:
         raise HTTPException(
@@ -95,12 +108,25 @@ async def create_reservation(
             "Run POST /api/v1/demo/seed first, or create the Branch row.",
         )
     if payload.table_id is not None:
-        table_exists = await db.scalar(select(DiningTable.id).where(DiningTable.id == payload.table_id))
-        if table_exists is None:
+        table = await db.get(DiningTable, payload.table_id)
+        if table is None or table.branch_id != payload.branch_id:
             raise HTTPException(
                 status_code=400,
-                detail=f"table_id {payload.table_id} does not exist for branch {payload.branch_id}.",
+                detail=f"table_id {payload.table_id} does not belong to branch {payload.branch_id}.",
             )
+        if payload.party_size > table.capacity:
+            raise HTTPException(status_code=400, detail="Party size exceeds table capacity")
+        duration = timedelta(minutes=settings.reservation_duration_minutes)
+        conflict = await db.scalar(
+            select(Reservation.id).where(
+                Reservation.table_id == payload.table_id,
+                Reservation.status.in_(["requested", "confirmed", "seated"]),
+                Reservation.start_at < payload.start_at + duration,
+                Reservation.start_at > payload.start_at - duration,
+            )
+        )
+        if conflict is not None:
+            raise HTTPException(status_code=409, detail="Table already has an overlapping reservation")
 
     row = Reservation(
         branch_id=payload.branch_id,
@@ -111,6 +137,16 @@ async def create_reservation(
         start_at=payload.start_at,
     )
     db.add(row)
+    await db.flush()
+    from app.core.audit import record_audit
+
+    await record_audit(
+        db,
+        actor_role=actor.role,
+        event_type="reservation.created",
+        payload={"reservation_id": row.id, "guest_name": row.guest_name},
+        branch_id=row.branch_id,
+    )
     await db.commit()
     await db.refresh(row)
     return _serialize(row)
@@ -121,6 +157,7 @@ async def update_reservation_status(
     reservation_id: int,
     payload: ReservationStatusUpdate,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict:
     """Move a reservation through its lifecycle.
 
@@ -130,6 +167,8 @@ async def update_reservation_status(
     row = await db.get(Reservation, reservation_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Reservation {reservation_id} not found")
+    require_branch_access(actor, row.branch_id)
+    require_permission(actor, "reservations.write")
 
     try:
         current = ReservationStatus(row.status)
@@ -147,6 +186,15 @@ async def update_reservation_status(
         ) from exc
 
     row.status = target.value
+    from app.core.audit import record_audit
+
+    await record_audit(
+        db,
+        actor_role=actor.role,
+        event_type="reservation.status_changed",
+        payload={"reservation_id": row.id, "status": row.status},
+        branch_id=row.branch_id,
+    )
     await db.commit()
     await db.refresh(row)
     return _serialize(row)

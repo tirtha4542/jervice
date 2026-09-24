@@ -58,7 +58,7 @@ class CacheClient:
             import redis.asyncio as aioredis  # type: ignore[import-untyped]
             self._redis = aioredis.from_url(settings.redis_url, decode_responses=True)
             await self._redis.ping()
-            logger.info("Connected to Redis cache at %s", settings.redis_url)
+            logger.info("Connected to Redis cache at %s", settings.redis_url.split("@")[-1])
         except Exception as exc:
             logger.warning("Redis unavailable (%s); using in-memory TTL cache.", exc)
             self._redis = None

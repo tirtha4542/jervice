@@ -6,13 +6,20 @@ from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.audit import record_audit
+from app.core.auth import (
+    ActorContext,
+    get_actor_context,
+    require_branch_access,
+    require_permission,
+)
 from app.core.database import get_db
+from app.services.operations import invalidate_operational_cache
 from app.models import Branch, InventorySku, MenuItem, RecipeComponent
 
 router = APIRouter(prefix="/api/v1", tags=["catalog"])
@@ -53,15 +60,28 @@ class InventorySkuOut(BaseModel):
     severity: str | None = None
 
 
+class RecipeLineCreate(BaseModel):
+    sku_id: int = Field(ge=1)
+    quantity: Decimal = Field(gt=0, description="Positive finite BOM quantity")
+
+    @field_validator("quantity")
+    @classmethod
+    def quantity_must_be_finite(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("quantity must be finite")
+        return value
+
+
 class MenuItemCreate(BaseModel):
     branch_id: int = Field(ge=1)
     name: str = Field(min_length=1, max_length=255, examples=["Miso Glazed Cod"])
-    description: str = ""
+    description: str = Field(default="", max_length=2000)
     price: Decimal = Field(gt=0, examples=["18.50"])
-    station: str = Field(default="kitchen", max_length=64)
-    allergens: list[str] = Field(default_factory=list)
-    recipe: list[dict[str, Any]] = Field(
+    station: str = Field(default="kitchen", min_length=1, max_length=64)
+    allergens: list[str] = Field(default_factory=list, max_length=30)
+    recipe: list[RecipeLineCreate] = Field(
         default_factory=list,
+        max_length=100,
         description='[{"sku_id": 1, "quantity": "0.200"}, ...]',
     )
 
@@ -112,8 +132,11 @@ async def list_menu(
     branch_id: int = Query(ge=1),
     station: str | None = Query(default=None, description="Filter by prep station"),
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> list[dict]:
     """Menu items for a branch, each with its recipe BOM and per-portion stock."""
+    require_branch_access(actor, branch_id)
+    require_permission(actor, "menu.read")
     stmt = (
         select(MenuItem)
         .options(
@@ -143,12 +166,17 @@ async def list_menu(
 async def create_menu_item(
     payload: MenuItemCreate,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict:
     """Create a menu item and, optionally, its recipe components (BOM)."""
+    require_branch_access(actor, payload.branch_id)
+    require_permission(actor, "menu.update")
     await _require_branch(db, payload.branch_id)
 
-    sku_ids = [line.get("sku_id") for line in payload.recipe if line.get("sku_id")]
+    sku_ids = [line.sku_id for line in payload.recipe]
     skus: dict[int, InventorySku] = {}
+    if len(sku_ids) != len(set(sku_ids)):
+        raise HTTPException(status_code=422, detail="A recipe may contain each SKU only once")
     if sku_ids:
         rows = (
             await db.execute(
@@ -178,26 +206,31 @@ async def create_menu_item(
     await db.flush()
 
     for line in payload.recipe:
-        quantity = line.get("quantity")
-        if quantity is None:
-            raise HTTPException(status_code=400, detail="each recipe line needs a quantity")
         db.add(
             RecipeComponent(
                 menu_item_id=item.id,
-                sku_id=int(line["sku_id"]),
-                quantity=Decimal(str(quantity)),
+                sku_id=line.sku_id,
+                quantity=line.quantity,
             )
         )
 
     await record_audit(
         db,
-        actor_role="manager",
+        actor_role=actor.role,
         event_type="menu_item.created",
         payload={"menu_item_id": item.id, "name": item.name},
         branch_id=payload.branch_id,
     )
     await db.commit()
+    await invalidate_operational_cache(branch_id=item.branch_id)
     await db.refresh(item)
+    recipe_rows = (
+        await db.execute(
+            select(RecipeComponent)
+            .options(selectinload(RecipeComponent.sku))
+            .where(RecipeComponent.menu_item_id == item.id)
+        )
+    ).scalars().unique().all()
 
     return {
         "id": item.id,
@@ -207,7 +240,7 @@ async def create_menu_item(
         "price": item.price,
         "station": item.station,
         "allergens": item.allergens,
-        "recipe": [],
+        "recipe": [_recipe_out(component, component.sku) for component in recipe_rows],
     }
 
 
@@ -216,8 +249,11 @@ async def list_inventory(
     branch_id: int = Query(ge=1),
     below_par_only: bool = Query(default=False),
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> list[dict]:
     """Inventory SKUs for a branch with par-level variance flags."""
+    require_branch_access(actor, branch_id)
+    require_permission(actor, "inventory.read")
     stmt = select(InventorySku).where(InventorySku.branch_id == branch_id)
     rows = (await db.execute(stmt.order_by(InventorySku.sku_code.asc()))).scalars().all()
     out = [_sku_out(row) for row in rows]
@@ -231,20 +267,28 @@ async def adjust_inventory(
     sku_id: int,
     payload: InventoryAdjust,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict:
     """Set an absolute on-hand quantity (goods-in, waste, stock count)."""
-    sku = await db.get(InventorySku, sku_id)
+    sku = (
+        await db.execute(
+            select(InventorySku).where(InventorySku.id == sku_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if sku is None:
         raise HTTPException(status_code=404, detail=f"SKU {sku_id} not found")
+    require_branch_access(actor, sku.branch_id)
+    require_permission(actor, "inventory.update")
     sku.on_hand = payload.on_hand
     await record_audit(
         db,
-        actor_role="manager",
+        actor_role=actor.role,
         event_type="inventory.adjusted",
         payload={"sku_id": sku.id, "sku_code": sku.sku_code, "on_hand": str(payload.on_hand)},
         branch_id=sku.branch_id,
     )
     await db.commit()
+    await invalidate_operational_cache(branch_id=sku.branch_id)
     await db.refresh(sku)
     return _sku_out(sku)
 
@@ -253,11 +297,14 @@ async def adjust_inventory(
 async def get_recipe(
     menu_item_id: int,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> list[dict]:
     """Recipe BOM for one menu item, annotated with live stock coverage."""
-    exists = await db.scalar(select(MenuItem.id).where(MenuItem.id == menu_item_id))
-    if exists is None:
+    menu = await db.get(MenuItem, menu_item_id)
+    if menu is None:
         raise HTTPException(status_code=404, detail=f"Menu item {menu_item_id} not found")
+    require_branch_access(actor, menu.branch_id)
+    require_permission(actor, "menu.read")
     rows = (
         await db.execute(
             select(RecipeComponent)

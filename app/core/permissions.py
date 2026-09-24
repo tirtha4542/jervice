@@ -32,8 +32,8 @@ def can_execute_tool(actor: ActorContext, tool_name: str) -> bool:
     """Determine whether an ActorContext is authorized to invoke a specific tool."""
     required_perm = TOOL_PERMISSION_MAP.get(tool_name)
     if not required_perm:
-        # If tool has no permission mapping, allow by default
-        return True
+        # Unknown/future tools must fail closed until explicitly registered.
+        return False
     return actor.has_permission(required_perm)
 
 
