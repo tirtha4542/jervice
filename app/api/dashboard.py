@@ -10,7 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.tools import check_recipe_bom_inventory, get_reservations, get_station_queues
+from app.services.operations import check_recipe_bom_inventory, get_reservations, get_station_queues
+from app.core.auth import ActorContext, get_actor_context, require_branch_access, require_permission
 from app.core.database import get_db
 from app.models import (
     AuditLog,
@@ -49,8 +50,11 @@ async def branch_dashboard(
     branch_id: int,
     hours: int = Query(default=24, ge=1, le=168, description="Look-back window"),
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict[str, Any]:
     """One payload for the whole branch: hierarchy, floor, kitchen, money, stock."""
+    require_branch_access(actor, branch_id)
+    require_permission(actor, "reports.read")
     branch = (
         await db.execute(
             select(Branch).where(Branch.id == branch_id)
@@ -100,7 +104,11 @@ async def branch_dashboard(
             select(func.coalesce(func.sum(Payment.amount), 0), func.count(Payment.id))
             .join(Order, Payment.order_id == Order.id)
             .join(TableSession, Order.table_session_id == TableSession.id)
-            .where(TableSession.branch_id == branch_id, Payment.status == "settled")
+            .where(
+                TableSession.branch_id == branch_id,
+                TableSession.opened_at >= since,
+                Payment.status == "settled",
+            )
         )
     ).one()
     open_row = (
@@ -110,6 +118,7 @@ async def branch_dashboard(
             .join(TableSession, Order.table_session_id == TableSession.id)
             .where(
                 TableSession.branch_id == branch_id,
+                TableSession.opened_at >= since,
                 Payment.status.in_(["unpaid", "partial", "authorized"]),
             )
         )

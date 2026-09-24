@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07111f">
+  <meta name="description" content="Tavonza hospitality operations and JARVIS intelligence console">
+  <title>Tavonza · JARVIS Console</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#mainContent">Skip to operations</a>
+
+  <div class="app-shell" id="appShell">
+    <aside class="sidebar" id="sidebar" aria-label="Console navigation">
+      <div class="brand-block">
+        <a class="brand" href="#overview" aria-label="Tavonza JARVIS home">
+          <span class="brand-mark" aria-hidden="true"><span>J</span></span>
+          <span class="brand-copy">
+            <strong>TAVONZA</strong>
+            <small>Hospitality intelligence</small>
+          </span>
+        </a>
+        <button class="icon-button sidebar-close" id="sidebarClose" type="button" aria-label="Close navigation">×</button>
+      </div>
+
+      <div class="venue-chip">
+        <span class="venue-chip__icon" aria-hidden="true">HQ</span>
+        <span>
+          <small>Active branch</small>
+          <strong id="sidebarBranchName">Branch 8</strong>
+        </span>
+        <span class="status-dot status-dot--pending" id="sidebarStatusDot" title="Connection pending"></span>
+      </div>
+
+      <nav class="nav-list" aria-label="Primary">
+        <p class="nav-label">Command</p>
+        <button class="nav-item is-active" type="button" data-view-target="overview" aria-current="page">
+          <span class="nav-icon" aria-hidden="true">⌂</span><span>Overview</span>
+        </button>
+        <button class="nav-item" type="button" data-view-target="tables">
+          <span class="nav-icon" aria-hidden="true">▦</span><span>Tables</span><span class="nav-count" id="navTableCount">—</span>
+        </button>
+        <button class="nav-item" type="button" data-view-target="orders">
+          <span class="nav-icon" aria-hidden="true">≡</span><span>Orders</span><span class="nav-count" id="navOrderCount">—</span>
+        </button>
+        <button class="nav-item" type="button" data-view-target="payments">
+          <span class="nav-icon" aria-hidden="true">◇</span><span>Payments</span>
+        </button>
+
+        <p class="nav-label nav-label--spaced">Engage</p>
+        <button class="nav-item" type="button" data-view-target="guests">
+          <span class="nav-icon" aria-hidden="true">⌁</span><span>QR guest test</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-card">
+        <span class="sidebar-card__eyebrow">JARVIS online</span>
+        <p>Ask for a live shift briefing or next-best action.</p>
+        <button class="text-button" type="button" data-jump-chat>Open briefing <span aria-hidden="true">→</span></button>
+      </div>
+
+      <div class="sidebar-footer">
+        <div class="connection-mini">
+          <span class="status-dot status-dot--pending" id="connectionMiniDot"></span>
+          <span><strong id="connectionMiniText">Checking backend</strong><small id="connectionMiniMeta">Same-origin proxy</small></span>
+        </div>
+        <span class="version-label">CONSOLE · 1.0</span>
+      </div>
+    </aside>
+
+    <button class="sidebar-scrim" id="sidebarScrim" type="button" aria-label="Close navigation"></button>
+
+    <section class="workspace">
+      <header class="topbar">
+        <div class="topbar__title">
+          <button class="icon-button menu-button" id="menuButton" type="button" aria-label="Open navigation" aria-expanded="false">☰</button>
+          <div>
+            <p class="eyebrow" id="viewEyebrow">Live operations</p>
+            <h1 id="viewTitle">Service overview</h1>
+          </div>
+        </div>
+
+        <div class="topbar__controls">
+          <label class="compact-field">
+            <span>Branch</span>
+            <select id="branchSelect" aria-label="Active branch">
+              <option value="8">Branch 8</option>
+            </select>
+          </label>
+          <label class="compact-field">
+            <span>Role lens</span>
+            <select id="roleSelect" aria-label="Active role">
+              <option value="manager">Manager</option>
+              <option value="waiter">Waiter</option>
+              <option value="kitchen">Kitchen</option>
+              <option value="cashier">Cashier</option>
+              <option value="customer">Customer</option>
+            </select>
+          </label>
+          <button class="icon-button refresh-button" id="refreshButton" type="button" aria-label="Refresh current view" title="Refresh current view">↻</button>
+          <button class="access-button" id="openAccessButton" type="button">
+            <span class="access-button__avatar" id="accessAvatar">M</span>
+            <span><small>Access</small><strong id="accessModeLabel">Dev bootstrap</strong></span>
+          </button>
+        </div>
+      </header>
+
+      <div class="sync-line" id="syncLine" aria-live="polite">
+        <span class="sync-line__bar"></span>
+      </div>
+
+      <main class="content" id="mainContent" tabindex="-1">
+        <section class="view-panel is-active" data-view-panel="overview" aria-labelledby="viewTitle">
+          <div class="hero-card">
+            <div class="hero-card__glow" aria-hidden="true"></div>
+            <div class="hero-copy">
+              <p class="eyebrow eyebrow--gold"><span class="pulse-dot"></span> Live branch intelligence</p>
+              <h2>Good service starts with <em>clarity.</em></h2>
+              <p>One operational view for the floor, kitchen, money, and every decision JARVIS can improve next.</p>
+            </div>
+            <div class="hero-time">
+              <span id="heroDate">—</span>
+              <strong id="heroTime">—</strong>
+              <small id="heroTimezone">Branch local time</small>
+            </div>
+          </div>
+
+          <div class="status-grid" aria-label="Backend status">
+            <article class="status-card">
+              <span class="status-card__icon status-card__icon--cyan">⌁</span>
+              <div><small>Backend</small><strong id="healthStatus">Checking</strong></div>
+              <span class="status-dot status-dot--pending" id="healthDot"></span>
+            </article>
+            <article class="status-card">
+              <span class="status-card__icon status-card__icon--green">↗</span>
+              <div><small>Proxy latency</small><strong id="healthLatency">—</strong></div>
+              <span class="micro-label">LIVE</span>
+            </article>
+            <article class="status-card">
+              <span class="status-card__icon status-card__icon--gold">◇</span>
+              <div><small>Payments due</small><strong id="moneyDue">—</strong></div>
+              <span class="micro-label" id="moneyDueCount">— open</span>
+            </article>
+            <article class="status-card">
+              <span class="status-card__icon status-card__icon--violet">J</span>
+              <div><small>Access lens</small><strong id="lensStatus">Manager</strong></div>
+              <span class="micro-label" id="tokenStatus">DEV</span>
+            </article>
+          </div>
+
+          <div class="section-heading">
+            <div><p class="eyebrow">Shift pulse</p><h2>At a glance</h2></div>
+            <span class="last-sync" id="lastSync">Not synced yet</span>
+          </div>
+
+          <div class="metric-grid" id="metricGrid" aria-live="polite">
+            <article class="metric-card skeleton-card"><span></span><span></span><span></span></article>
+            <article class="metric-card skeleton-card"><span></span><span></span><span></span></article>
+            <article class="metric-card skeleton-card"><span></span><span></span><span></span></article>
+            <article class="metric-card skeleton-card"><span></span><span></span><span></span></article>
+          </div>
+
+          <div class="overview-grid">
+            <section class="card jarvis-card" id="jarvisSection" aria-labelledby="jarvisHeading">
+              <div class="card-header">
+                <div class="jarvis-identity">
+                  <span class="jarvis-orb" aria-hidden="true"><span></span></span>
+                  <div><p class="eyebrow eyebrow--gold">Intelligence layer</p><h2 id="jarvisHeading">JARVIS briefing</h2></div>
+                </div>
+                <button class="text-button" id="newChatButton" type="button">New thread</button>
+              </div>
+              <div class="chat-log" id="chatLog" role="log" aria-live="polite" aria-label="JARVIS conversation">
+                <div class="chat-message chat-message--bot">
+                  <span class="message-avatar">J</span>
+                  <div class="message-body">
+                    <p>Good evening. I’m connected to this branch’s live operating context. What would you like to improve tonight?</p>
+                  </div>
+                </div>
+              </div>
+              <div class="quick-prompts" aria-label="Suggested questions">
+                <button type="button" data-prompt="Give me the top three priorities for the next 60 minutes.">Top priorities</button>
+                <button type="button" data-prompt="Brief me on kitchen load and likely bottlenecks.">Kitchen load</button>
+                <button type="button" data-prompt="Where is money at risk on the floor right now?">Revenue risk</button>
+              </div>
+              <form class="chat-form" id="chatForm">
+                <label class="sr-only" for="chatInput">Ask JARVIS</label>
+                <textarea id="chatInput" rows="1" maxlength="1200" placeholder="Ask for a shift briefing or next-best action…" required></textarea>
+                <button class="primary-button primary-button--icon" id="chatSendButton" type="submit" aria-label="Send to JARVIS">↑</button>
+              </form>
+              <p class="form-footnote">Responses use the selected branch and role. Avoid sharing sensitive guest information.</p>
+            </section>
+
+            <div class="overview-side">
+              <section class="card" aria-labelledby="servicePulseHeading">
+                <div class="card-header">
+                  <div><p class="eyebrow">Realtime</p><h2 id="servicePulseHeading">Service pulse</h2></div>
+                  <span class="live-label"><span class="pulse-dot"></span> Live</span>
+                </div>
+                <div class="pulse-list" id="servicePulse">
+                  <div class="loading-line">Loading branch context…</div>
+                </div>
+              </section>
+
+              <section class="card" aria-labelledby="activityHeading">
+                <div class="card-header">
+                  <div><p class="eyebrow">Audit trail</p><h2 id="activityHeading">Recent activity</h2></div>
+                  <span class="micro-label" id="auditCount">—</span>
+                </div>
+                <div class="activity-list" id="activityList">
+                  <div class="loading-line">Reading recent events…</div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </section>
+
+        <section class="view-panel" data-view-panel="tables" hidden>
+          <div class="page-intro">
+            <div><p class="eyebrow">Floor control</p><h2>Tables & service sessions</h2><p>Physical table state and shared guest sessions remain independently visible.</p></div>
+            <div class="page-actions">
+              <label class="search-field"><span aria-hidden="true">⌕</span><span class="sr-only">Search tables</span><input id="tableSearch" type="search" placeholder="Search table code"></label>
+              <button class="secondary-button" id="refreshTablesButton" type="button">Refresh</button>
+            </div>
+          </div>
+          <div class="detail-grid">
+            <section class="card" aria-labelledby="floorHeading">
+              <div class="card-header"><div><p class="eyebrow">Live floor</p><h2 id="floorHeading">Table map</h2></div><span class="micro-label" id="tableCountLabel">— tables</span></div>
+              <div class="table-grid" id="tableGrid" aria-live="polite"><div class="loading-block">Loading floor state…</div></div>
+            </section>
+            <aside class="card session-panel" aria-labelledby="sessionsHeading">
+              <div class="card-header"><div><p class="eyebrow">Shared visits</p><h2 id="sessionsHeading">Service sessions</h2></div><span class="micro-label" id="openSessionCount">— open</span></div>
+              <div class="session-list" id="sessionList" aria-live="polite"><div class="loading-line">Loading service sessions…</div></div>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view-panel" data-view-panel="orders" hidden>
+          <div class="page-intro">
+            <div><p class="eyebrow">Kitchen & tickets</p><h2>Active orders</h2><p>Track ticket lifecycle, stations, modifiers, and totals in one queue.</p></div>
+            <div class="page-actions">
+              <label class="search-field"><span aria-hidden="true">⌕</span><span class="sr-only">Search orders</span><input id="orderSearch" type="search" placeholder="Search order or item"></label>
+              <select class="filter-select" id="orderStatusFilter" aria-label="Filter orders by status"><option value="all">All statuses</option></select>
+              <button class="secondary-button" id="refreshOrdersButton" type="button">Refresh</button>
+            </div>
+          </div>
+          <div class="summary-strip" id="orderSummary" aria-live="polite"></div>
+          <div class="order-list" id="orderList" aria-live="polite"><div class="loading-block">Loading active orders…</div></div>
+        </section>
+
+        <section class="view-panel" data-view-panel="payments" hidden>
+          <div class="page-intro">
+            <div><p class="eyebrow">Settlement desk</p><h2>Payments & split bills</h2><p>Review a table session’s payment intents and settle authorized balances.</p></div>
+            <div class="page-actions">
+              <label class="compact-field compact-field--wide"><span>Table session</span><select id="paymentSessionSelect"><option value="">Choose a session</option></select></label>
+              <button class="secondary-button" id="refreshPaymentsButton" type="button">Refresh</button>
+            </div>
+          </div>
+          <div class="summary-strip" id="paymentSummary" aria-live="polite"></div>
+          <div class="payment-layout">
+            <section class="card" aria-labelledby="paymentActivityHeading">
+              <div class="card-header"><div><p class="eyebrow">Ledger</p><h2 id="paymentActivityHeading">Payment activity</h2></div><span class="micro-label" id="paymentCountLabel">— records</span></div>
+              <div class="payment-list" id="paymentList" aria-live="polite"><div class="loading-block">Choose a table session to begin.</div></div>
+            </section>
+            <aside class="card" aria-labelledby="postPaymentHeading">
+              <div class="card-header"><div><p class="eyebrow">New intent</p><h2 id="postPaymentHeading">Post a payment</h2></div></div>
+              <form class="stack-form" id="paymentForm">
+                <label class="field"><span>Order</span><select id="paymentOrderSelect" name="order_id" required><option value="">Select an order</option></select></label>
+                <div class="form-row">
+                  <label class="field"><span>Amount</span><input id="paymentAmount" name="amount" type="number" min="0.01" step="0.01" placeholder="0.00" required></label>
+                  <label class="field"><span>Method</span><select id="paymentMethod" name="method"><option value="card">Card</option><option value="cash">Cash</option><option value="split">Split</option><option value="wallet">Wallet</option></select></label>
+                </div>
+                <label class="field"><span>Guest session <small>optional</small></span><input id="paymentGuestId" name="guest_session_id" type="number" min="1" inputmode="numeric" placeholder="For an individual split"></label>
+                <button class="primary-button" id="postPaymentButton" type="submit">Post payment</button>
+                <p class="form-message" id="paymentFormMessage" role="status"></p>
+              </form>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view-panel" data-view-panel="guests" hidden>
+          <div class="page-intro">
+            <div><p class="eyebrow">QR workflow</p><h2>Guest join test</h2><p>Exercise the shared-session join flow with a table session and its issued OTP.</p></div>
+            <span class="test-badge">Development tool</span>
+          </div>
+          <div class="guest-layout">
+            <aside class="qr-card" aria-label="QR test illustration">
+              <div class="qr-card__header"><span>TABLE ACCESS</span><span class="status-dot status-dot--ok"></span></div>
+              <div class="qr-art" aria-hidden="true">
+                <span class="qr-corner qr-corner--tl"></span><span class="qr-corner qr-corner--tr"></span><span class="qr-corner qr-corner--bl"></span>
+                <i></i><i></i><i></i><i></i><i></i><i></i>
+              </div>
+              <h3>Scan. Verify. Join.</h3>
+              <p>The join is added to the existing table session; it does not occupy a second table.</p>
+            </aside>
+            <section class="card guest-form-card" aria-labelledby="guestJoinHeading">
+              <div class="card-header"><div><p class="eyebrow">Manual QR simulation</p><h2 id="guestJoinHeading">Join a table session</h2></div></div>
+              <form class="stack-form" id="guestJoinForm">
+                <label class="field"><span>Open table session</span><select id="guestSessionSelect" name="table_session_id" required><option value="">Loading sessions…</option></select></label>
+                <div class="form-row">
+                  <label class="field"><span>Display name</span><input id="guestName" name="display_name" maxlength="128" autocomplete="name" value="Test Guest" required></label>
+                  <label class="field"><span>Phone <small>optional</small></span><input id="guestPhone" name="phone" maxlength="32" autocomplete="tel" placeholder="Optional"></label>
+                </div>
+                <label class="field"><span>Table QR OTP</span><input id="guestOtp" name="otp" minlength="4" maxlength="8" inputmode="numeric" autocomplete="one-time-code" placeholder="Issued test OTP" required></label>
+                <label class="field"><span>QR token <small>future real QR flow</small></span><input id="guestQrToken" name="qr_token" maxlength="256" autocomplete="off" placeholder="Optional when QR provider is enabled"></label>
+                <fieldset class="checkbox-field">
+                  <legend>Dietary preferences</legend>
+                  <div class="checkbox-grid">
+                    <label><input type="checkbox" name="dietary" value="vegetarian"><span>Vegetarian</span></label>
+                    <label><input type="checkbox" name="dietary" value="vegan"><span>Vegan</span></label>
+                    <label><input type="checkbox" name="dietary" value="gluten_free"><span>Gluten-free</span></label>
+                    <label><input type="checkbox" name="dietary" value="nut_allergy"><span>Nut allergy</span></label>
+                  </div>
+                </fieldset>
+                <label class="confirm-check"><input id="guestTestConfirm" name="test_confirmed" type="checkbox"><span>I confirm this is a local test QR/OTP join and the guest has been notified.</span></label>
+                <button class="primary-button" id="guestJoinButton" type="submit">Simulate guest join</button>
+                <p class="form-message" id="guestJoinMessage" role="status"></p>
+              </form>
+            </section>
+          </div>
+        </section>
+      </main>
+
+      <footer class="app-footer"><span>Tavonza JARVIS Console</span><span>Backend data rendered as text · Tokens stay in this browser session</span></footer>
+    </section>
+  </div>
+
+  <dialog class="access-dialog" id="accessDialog" aria-labelledby="accessDialogTitle">
+    <form id="accessForm" class="dialog-card">
+      <div class="dialog-header">
+        <div><p class="eyebrow eyebrow--gold">Secure workspace</p><h2 id="accessDialogTitle">Connect to Tavonza</h2><p>Use a backend JWT or the explicitly configured local bootstrap secret.</p></div>
+        <button class="icon-button" id="closeAccessButton" type="button" aria-label="Close access dialog">×</button>
+      </div>
+
+      <label class="field">
+        <span>Bearer token <small>use a token issued by the backend</small></span>
+        <span class="password-wrap"><input id="tokenInput" name="token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Paste a development JWT"><button id="toggleTokenButton" type="button" aria-label="Show token">Show</button></span>
+      </label>
+      <label class="field">
+        <span>Local bootstrap secret <small>only for the local QR/AI console</small></span>
+        <input id="bootstrapInput" name="bootstrap" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Configured DEV_AUTH_TOKEN">
+      </label>
+      <div class="form-row">
+        <label class="field"><span>Branch ID</span><input id="accessBranchInput" name="branch_id" type="number" min="1" inputmode="numeric" value="8" required></label>
+        <label class="field"><span>Role lens</span><select id="accessRoleSelect" name="role"><option value="manager">Manager</option><option value="waiter">Waiter</option><option value="kitchen">Kitchen</option><option value="cashier">Cashier</option><option value="customer">Customer</option></select></label>
+      </div>
+      <label class="confirm-check"><input id="sessionTokenCheck" type="checkbox" checked><span>Keep this token for this browser session only</span></label>
+      <p class="dialog-note">The token is stored in <code>sessionStorage</code>, attached as <code>Authorization: Bearer …</code>, and cleared when the tab session ends.</p>
+      <p class="form-message form-message--large" id="accessMessage" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="secondary-button" id="devBootstrapButton" type="button">Use dev bootstrap</button>
+        <button class="primary-button" id="accessSubmitButton" type="submit">Connect workspace</button>
+      </div>
+      <button class="text-button text-button--danger" id="clearTokenButton" type="button">Clear saved token</button>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

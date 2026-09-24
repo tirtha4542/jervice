@@ -6,13 +6,23 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.ai.tools import get_active_orders, get_station_queues
+from app.services.operations import (
+    get_active_orders,
+    get_station_queues,
+    invalidate_operational_cache,
+)
 from app.core.audit import record_audit
+from app.core.auth import (
+    ActorContext,
+    get_actor_context,
+    require_branch_access,
+    require_permission,
+)
 from app.core.database import get_db
 from app.domain.state_machines import (
     InvalidStateTransition,
@@ -49,7 +59,7 @@ def _conflict(exc: Exception, enum_cls: type, current: str) -> HTTPException:
 class OrderItemCreate(BaseModel):
     menu_item_id: int = Field(ge=1)
     quantity: int = Field(default=1, ge=1, le=99)
-    modifiers: list[str] = Field(default_factory=list, examples=[["no onions"]])
+    modifiers: list[str] = Field(default_factory=list, max_length=20, examples=[["no onions"]])
 
 
 class OrderCreate(BaseModel):
@@ -58,7 +68,7 @@ class OrderCreate(BaseModel):
         default=None, description="Omit for a shared/table-wide order"
     )
     is_shared: bool = Field(default=False)
-    items: list[OrderItemCreate] = Field(default_factory=list)
+    items: list[OrderItemCreate] = Field(default_factory=list, max_length=100)
 
 
 class OrderItemOut(BaseModel):
@@ -86,8 +96,15 @@ class OrderOut(BaseModel):
 class PaymentCreate(BaseModel):
     order_id: int = Field(ge=1)
     guest_session_id: int | None = None
-    amount: Decimal = Field(gt=0, examples=["24.50"])
+    amount: Decimal = Field(gt=0, le=Decimal("100000000"), examples=["24.50"])
     method: Literal["card", "cash", "split", "wallet"] = "card"
+
+    @field_validator("amount")
+    @classmethod
+    def amount_must_be_finite(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("amount must be finite")
+        return value
 
 
 class PaymentOut(BaseModel):
@@ -111,6 +128,30 @@ async def _load_order(db: AsyncSession, order_id: int) -> Order | None:
             .where(Order.id == order_id)
         )
     ).scalar_one_or_none()
+
+
+async def _order_for_actor(
+    db: AsyncSession,
+    order_id: int,
+    actor: ActorContext,
+    permission: str,
+) -> Order:
+    order = (
+        await db.execute(
+            select(Order)
+            .options(selectinload(Order.items), selectinload(Order.payments))
+            .where(Order.id == order_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if order is None:
+        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+    session = await db.get(TableSession, order.table_session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Order session not found")
+    require_branch_access(actor, session.branch_id)
+    require_permission(actor, permission)
+    return order
 
 
 def _serialize_order(order: Order, prices: dict[int, tuple[str, Decimal]] | None = None) -> dict:
@@ -159,8 +200,15 @@ async def list_orders(
     branch_id: int = Query(ge=1),
     table_session_id: int | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> list[dict]:
     """Active orders for a branch — the same tool JARVIS reads."""
+    require_branch_access(actor, branch_id)
+    require_permission(actor, "orders.read")
+    if table_session_id is not None:
+        session = await db.get(TableSession, table_session_id)
+        if session is None or session.branch_id != branch_id:
+            raise HTTPException(status_code=404, detail="Table session not found in branch")
     payload = await get_active_orders(db, branch_id, table_session_id)
     if not payload:
         return []
@@ -207,6 +255,7 @@ async def list_orders(
 async def create_order(
     payload: OrderCreate,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict:
     """Create a draft order with line items on an open table session."""
     session = await db.get(TableSession, payload.table_session_id)
@@ -215,6 +264,10 @@ async def create_order(
             status_code=400,
             detail=f"table_session_id {payload.table_session_id} does not exist.",
         )
+    require_branch_access(actor, session.branch_id)
+    require_permission(actor, "orders.create")
+    if session.status == "closed":
+        raise HTTPException(status_code=409, detail="Cannot create an order on a closed session")
     if payload.guest_session_id is not None:
         guest = await db.get(GuestSession, payload.guest_session_id)
         if guest is None or guest.table_session_id != payload.table_session_id:
@@ -238,6 +291,8 @@ async def create_order(
             raise HTTPException(
                 status_code=400, detail=f"menu_item_id {line.menu_item_id} does not exist."
             )
+        if menu.branch_id != session.branch_id:
+            raise HTTPException(status_code=400, detail="Menu item is outside the order branch")
         db.add(
             OrderItem(
                 order_id=order.id,
@@ -251,12 +306,13 @@ async def create_order(
 
     await record_audit(
         db,
-        actor_role="waiter",
+        actor_role=actor.role,
         event_type="order.created",
         payload={"order_id": order.id, "table_session_id": payload.table_session_id},
         branch_id=session.branch_id,
     )
     await db.commit()
+    await invalidate_operational_cache(branch_id=session.branch_id, table_session_id=order.table_session_id)
 
     loaded = await _load_order(db, order.id)
     prices = await _prices_for(db, {i.menu_item_id for i in loaded.items})
@@ -264,10 +320,12 @@ async def create_order(
 
 
 @router.get("/orders/{order_id}", response_model=OrderOut)
-async def get_order(order_id: int, db: AsyncSession = Depends(get_db)) -> dict:
-    order = await _load_order(db, order_id)
-    if order is None:
-        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+async def get_order(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
+) -> dict:
+    order = await _order_for_actor(db, order_id, actor, "orders.read")
     prices = await _prices_for(db, {i.menu_item_id for i in order.items})
     return _serialize_order(order, prices)
 
@@ -277,10 +335,9 @@ async def add_order_item(
     order_id: int,
     payload: OrderItemCreate,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict:
-    order = await db.get(Order, order_id)
-    if order is None:
-        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+    order = await _order_for_actor(db, order_id, actor, "orders.update")
     if order.status in (OrderStatus.CANCELLED.value, OrderStatus.SERVED.value):
         raise HTTPException(
             status_code=409,
@@ -291,6 +348,9 @@ async def add_order_item(
         raise HTTPException(
             status_code=400, detail=f"menu_item_id {payload.menu_item_id} does not exist."
         )
+    session = await db.get(TableSession, order.table_session_id)
+    if session is None or menu.branch_id != session.branch_id:
+        raise HTTPException(status_code=400, detail="Menu item is outside the order branch")
     item = OrderItem(
         order_id=order.id,
         menu_item_id=menu.id,
@@ -300,7 +360,16 @@ async def add_order_item(
         station=menu.station,
     )
     db.add(item)
+    await db.flush()
+    await record_audit(
+        db,
+        actor_role=actor.role,
+        event_type="order_item.added",
+        payload={"order_id": order.id, "menu_item_id": menu.id, "quantity": payload.quantity},
+        branch_id=session.branch_id,
+    )
     await db.commit()
+    await invalidate_operational_cache(branch_id=session.branch_id, table_session_id=order.table_session_id)
     loaded = await _load_order(db, order_id)
     prices = await _prices_for(db, {i.menu_item_id for i in loaded.items})
     return _serialize_order(loaded, prices)
@@ -311,28 +380,33 @@ async def update_order_status(
     order_id: int,
     payload: StatusUpdate,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict:
     """Advance the ticket lifecycle; illegal jumps return 409 with the allow-list."""
-    order = await db.get(Order, order_id)
-    if order is None:
-        raise HTTPException(status_code=404, detail=f"Order {order_id} not found")
+    order = await _order_for_actor(db, order_id, actor, "orders.update")
     try:
         target = OrderStatus(payload.status)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if target is OrderStatus.CANCELLED:
+        require_permission(actor, "orders.cancel")
     try:
         apply_transition(OrderStatus, OrderStatus(order.status), target)
     except (InvalidStateTransition, ValueError) as exc:
         raise _conflict(exc, OrderStatus, order.status) from exc
 
     order.status = target.value
+    session = await db.get(TableSession, order.table_session_id)
     await record_audit(
         db,
-        actor_role="waiter",
+        actor_role=actor.role,
         event_type="order.status_changed",
         payload={"order_id": order.id, "status": order.status},
+        branch_id=session.branch_id if session else None,
     )
     await db.commit()
+    if session:
+        await invalidate_operational_cache(branch_id=session.branch_id, table_session_id=order.table_session_id)
     loaded = await _load_order(db, order_id)
     prices = await _prices_for(db, {i.menu_item_id for i in loaded.items})
     return _serialize_order(loaded, prices)
@@ -343,11 +417,13 @@ async def update_order_item_status(
     item_id: int,
     payload: StatusUpdate,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict:
     """Station-level prep: queued → prepping → fired → ready → picked_up."""
     item = await db.get(OrderItem, item_id)
     if item is None:
         raise HTTPException(status_code=404, detail=f"Order item {item_id} not found")
+    order = await _order_for_actor(db, item.order_id, actor, "kitchen.queue.update")
     try:
         target = OrderItemStatus(payload.status)
     except ValueError as exc:
@@ -358,7 +434,17 @@ async def update_order_item_status(
         raise _conflict(exc, OrderItemStatus, item.status) from exc
 
     item.status = target.value
+    session = await db.get(TableSession, order.table_session_id)
+    await record_audit(
+        db,
+        actor_role=actor.role,
+        event_type="order_item.status_changed",
+        payload={"order_item_id": item.id, "status": item.status},
+        branch_id=session.branch_id if session else None,
+    )
     await db.commit()
+    if session:
+        await invalidate_operational_cache(branch_id=session.branch_id, table_session_id=order.table_session_id)
     await db.refresh(item)
     menu = await db.get(MenuItem, item.menu_item_id)
     return {
@@ -378,8 +464,11 @@ async def update_order_item_status(
 async def kitchen_queues(
     branch_id: int = Query(ge=1),
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict[str, Any]:
     """Live tickets grouped by station — the kitchen display payload."""
+    require_branch_access(actor, branch_id)
+    require_permission(actor, "kitchen.queue.read")
     return await get_station_queues(db, branch_id)
 
 
@@ -387,11 +476,10 @@ async def kitchen_queues(
 async def create_payment(
     payload: PaymentCreate,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict:
     """Post a payment against an order (start of a per-guest or shared settle)."""
-    order = await db.get(Order, payload.order_id)
-    if order is None:
-        raise HTTPException(status_code=400, detail=f"order_id {payload.order_id} does not exist.")
+    order = await _order_for_actor(db, payload.order_id, actor, "payments.create")
     if payload.guest_session_id is not None:
         guest = await db.get(GuestSession, payload.guest_session_id)
         if guest is None or guest.table_session_id != order.table_session_id:
@@ -399,6 +487,28 @@ async def create_payment(
                 status_code=400,
                 detail="guest_session_id must belong to the order's table session.",
             )
+    session = await db.get(TableSession, order.table_session_id)
+    if session is None or session.status == "closed":
+        raise HTTPException(status_code=409, detail="Payment requires an open table session")
+    prices = await _prices_for(db, {item.menu_item_id for item in order.items})
+    order_total = sum(
+        (prices.get(item.menu_item_id, (None, Decimal("0")))[1] or Decimal("0")) * item.quantity
+        for item in order.items
+    )
+    already_recorded = sum(
+        (
+            payment.amount
+            for payment in order.payments
+            if payment.status not in {PaymentStatus.FAILED.value, PaymentStatus.REFUNDED.value}
+        ),
+        Decimal("0"),
+    )
+    outstanding = max(Decimal("0"), order_total - already_recorded)
+    if payload.amount > outstanding:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Payment exceeds the outstanding order balance. Remaining: {outstanding:.2f}",
+        )
     payment = Payment(
         order_id=order.id,
         guest_session_id=payload.guest_session_id,
@@ -410,11 +520,13 @@ async def create_payment(
     await db.flush()
     await record_audit(
         db,
-        actor_role="cashier",
+        actor_role=actor.role,
         event_type="payment.created",
         payload={"payment_id": payment.id, "amount": str(payment.amount)},
+        branch_id=session.branch_id,
     )
     await db.commit()
+    await invalidate_operational_cache(branch_id=session.branch_id, table_session_id=order.table_session_id)
     await db.refresh(payment)
     return _serialize_payment(payment)
 
@@ -434,8 +546,14 @@ def _serialize_payment(payment: Payment) -> dict:
 async def list_payments(
     table_session_id: int = Query(ge=1),
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> list[dict]:
     """All payments for one table session (split-bill view)."""
+    session = await db.get(TableSession, table_session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Table session not found")
+    require_branch_access(actor, session.branch_id)
+    require_permission(actor, "payments.read")
     rows = (
         await db.execute(
             select(Payment)
@@ -452,27 +570,39 @@ async def update_payment_status(
     payment_id: int,
     payload: StatusUpdate,
     db: AsyncSession = Depends(get_db),
+    actor: ActorContext = Depends(get_actor_context),
 ) -> dict:
     """Settle (or refund) a payment; illegal jumps return 409."""
-    payment = await db.get(Payment, payment_id)
+    payment = (
+        await db.execute(
+            select(Payment).where(Payment.id == payment_id).with_for_update()
+        )
+    ).scalar_one_or_none()
     if payment is None:
         raise HTTPException(status_code=404, detail=f"Payment {payment_id} not found")
+    order = await _order_for_actor(db, payment.order_id, actor, "payments.create")
     try:
         target = PaymentStatus(payload.status)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if target is PaymentStatus.REFUNDED:
+        require_permission(actor, "payments.refund")
     try:
         apply_transition(PaymentStatus, PaymentStatus(payment.status), target)
     except (InvalidStateTransition, ValueError) as exc:
         raise _conflict(exc, PaymentStatus, payment.status) from exc
 
     payment.status = target.value
+    session = await db.get(TableSession, order.table_session_id)
     await record_audit(
         db,
-        actor_role="cashier",
+        actor_role=actor.role,
         event_type=f"payment.{target.value}",
         payload={"payment_id": payment.id, "amount": str(payment.amount)},
+        branch_id=session.branch_id if session else None,
     )
     await db.commit()
+    if session:
+        await invalidate_operational_cache(branch_id=session.branch_id, table_session_id=order.table_session_id)
     await db.refresh(payment)
     return _serialize_payment(payment)

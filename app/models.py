@@ -4,13 +4,16 @@ from decimal import Decimal
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -88,7 +91,10 @@ class Employee(Base):
 
 class DiningTable(Base):
     __tablename__ = "dining_tables"
-    __table_args__ = (UniqueConstraint("branch_id", "code", name="uq_branch_table_code"),)
+    __table_args__ = (
+        UniqueConstraint("branch_id", "code", name="uq_branch_table_code"),
+        CheckConstraint("capacity > 0", name="ck_dining_table_capacity_positive"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id"), nullable=False)
@@ -102,6 +108,14 @@ class DiningTable(Base):
 
 class TableSession(Base):
     __tablename__ = "table_sessions"
+    __table_args__ = (
+        Index(
+            "uq_table_sessions_active_table",
+            "table_id",
+            unique=True,
+            postgresql_where=text("status <> 'closed'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     table_id: Mapped[int] = mapped_column(ForeignKey("dining_tables.id"), nullable=False)
@@ -142,7 +156,11 @@ class MenuItem(Base):
 
 class InventorySku(Base):
     __tablename__ = "inventory_skus"
-    __table_args__ = (UniqueConstraint("branch_id", "sku_code", name="uq_branch_sku"),)
+    __table_args__ = (
+        UniqueConstraint("branch_id", "sku_code", name="uq_branch_sku"),
+        CheckConstraint("on_hand >= 0", name="ck_inventory_on_hand_nonnegative"),
+        CheckConstraint("par_level >= 0", name="ck_inventory_par_nonnegative"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id"), nullable=False)
@@ -155,6 +173,10 @@ class InventorySku(Base):
 
 class RecipeComponent(Base):
     __tablename__ = "recipe_components"
+    __table_args__ = (
+        UniqueConstraint("menu_item_id", "sku_id", name="uq_recipe_menu_sku"),
+        CheckConstraint("quantity > 0", name="ck_recipe_quantity_positive"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     menu_item_id: Mapped[int] = mapped_column(ForeignKey("menu_items.id"), nullable=False)
@@ -179,6 +201,7 @@ class Order(Base):
 
 class OrderItem(Base):
     __tablename__ = "order_items"
+    __table_args__ = (CheckConstraint("quantity > 0", name="ck_order_item_quantity_positive"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), nullable=False)
@@ -192,6 +215,7 @@ class OrderItem(Base):
 
 class Payment(Base):
     __tablename__ = "payments"
+    __table_args__ = (CheckConstraint("amount > 0", name="ck_payment_amount_positive"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("orders.id"), nullable=False)
@@ -204,6 +228,7 @@ class Payment(Base):
 
 class Reservation(Base):
     __tablename__ = "reservations"
+    __table_args__ = (CheckConstraint("party_size > 0", name="ck_reservation_party_size_positive"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     branch_id: Mapped[int] = mapped_column(ForeignKey("branches.id"), nullable=False)

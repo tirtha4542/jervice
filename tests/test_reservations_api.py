@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from app.core.config import settings
+from app.core.auth import create_access_token
 from app.api.reservations import ReservationOut
 from app.domain.state_machines import (
     InvalidStateTransition,
@@ -9,7 +10,10 @@ from app.domain.state_machines import (
 )
 from app.main import app
 
-client = TestClient(app)
+client = TestClient(
+    app,
+    headers={"Authorization": f"Bearer {create_access_token({'sub': 1, 'role': 'manager', 'branch_id': 8})}"},
+)
 
 
 def test_openapi_lists_reservation_routes():
@@ -34,7 +38,7 @@ def test_list_reservations_requires_branch_id():
 
 
 def test_list_rejects_unknown_status():
-    response = client.get("/api/v1/reservations", params={"branch_id": 1, "status": "bogus"})
+    response = client.get("/api/v1/reservations", params={"branch_id": 8, "status": "bogus"})
     assert response.status_code == 422
 
 
