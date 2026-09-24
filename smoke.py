@@ -14,8 +14,11 @@ import sys
 
 import httpx
 
+from app.core.auth import create_access_token
+
 BASE = "http://127.0.0.1:8000"
 BRANCH = 8
+TOKEN = create_access_token({"sub": 1, "org_id": 1, "branch_id": BRANCH, "role": "manager"})
 
 PASS, FAIL = "PASS", "FAIL"
 results: list[tuple[str, str, str]] = []
@@ -42,7 +45,11 @@ def show(name: str, data, limit: int = 3) -> None:
 
 
 def main() -> int:
-    with httpx.Client(base_url=BASE, timeout=30.0) as client:
+    with httpx.Client(
+        base_url=BASE,
+        timeout=30.0,
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    ) as client:
         check("GET /health", client.get("/health"))
         check("GET /", client.get("/"))
 
@@ -113,7 +120,11 @@ def main() -> int:
             "POST /api/v1/table-sessions/{id}/guests",
             client.post(
                 f"/api/v1/table-sessions/{session_id}/guests",
-                json={"display_name": "Smoke Tester", "otp": "123456"},
+                json={
+                    "display_name": "Smoke Tester",
+                    "otp": "123456",
+                    "test_qr_verified": True,
+                },
             ),
             expect=201,
         )

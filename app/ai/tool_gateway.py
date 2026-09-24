@@ -1,48 +1,42 @@
-"""Secured Tool Gateway & Scope Injection Layer.
+"""Route-backed AI tool gateway.
 
-Validates actor permissions, injects scope boundaries (branch_id, org_id),
-and executes domain tools safely with audit logging.
-Strictly read-only for AI tools: AI agents inspect state but do not mutate database tables directly.
+The gateway deliberately contains no SQLAlchemy session. It calls the
+backend's authenticated operations route and lets the backend apply the
+resource/tenant policy.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.ai.tools import (
-    check_recipe_bom_inventory,
-    get_active_orders,
-    get_branch_inventory,
-    get_payment_split_view,
-    get_reservations,
-    get_station_queues,
-    get_table_session_state,
-)
-from app.core.audit import record_audit
+from app.ai.backend_client import BackendRouteClient, BackendRouteError
 from app.core.auth import ActorContext
 from app.core.permissions import can_execute_tool, prune_tools_for_actor
 
 logger = logging.getLogger(__name__)
 
-# Registry of executable tool functions
-TOOL_EXECUTORS: dict[str, Callable[..., Any]] = {
-    "get_table_session_state": get_table_session_state,
-    "get_active_orders": get_active_orders,
-    "get_station_queues": get_station_queues,
-    "check_recipe_bom_inventory": check_recipe_bom_inventory,
-    "get_branch_inventory": get_branch_inventory,
-    "get_payment_split_view": get_payment_split_view,
-    "get_reservations": get_reservations,
+TOOL_PERMISSION_MAP: dict[str, str] = {
+    "get_table_session_state": "session.read",
+    "get_active_orders": "orders.read",
+    "get_station_queues": "kitchen.queue.read",
+    "check_recipe_bom_inventory": "inventory.read",
+    "get_branch_inventory": "inventory.read",
+    "get_payment_split_view": "payments.read",
+    "get_reservations": "tables.read",
+    "get_branch_summary": "reports.read",
+    "get_sales_summary": "reports.read",
+    "update_order_item_status": "kitchen.queue.update",
+    "mark_order_item_ready": "kitchen.queue.update",
+    "serve_order": "orders.serve",
+    "cancel_order": "orders.cancel",
+    "refund_payment": "payments.refund",
 }
 
-# Declarative metadata schemas for tool pruning & LLM binding
 AVAILABLE_TOOLS_SCHEMA: list[dict[str, Any]] = [
     {
         "name": "get_table_session_state",
-        "description": "Fetch status, guests, and orders for a specific table session.",
+        "description": "Fetch status and guests for a specific table session.",
         "parameters": {
             "type": "object",
             "properties": {"table_session_id": {"type": "integer"}},
@@ -51,46 +45,27 @@ AVAILABLE_TOOLS_SCHEMA: list[dict[str, Any]] = [
     },
     {
         "name": "get_active_orders",
-        "description": "Get active orders and order items for the branch or table session.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "branch_id": {"type": "integer"},
-                "table_session_id": {"type": "integer"},
-            },
-            "required": [],
-        },
+        "description": "Get active orders and line items for the actor's branch.",
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "get_station_queues",
-        "description": "Retrieve active kitchen station queues and ready tickets.",
-        "parameters": {
-            "type": "object",
-            "properties": {"branch_id": {"type": "integer"}},
-            "required": [],
-        },
+        "description": "Retrieve active kitchen station queues.",
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "check_recipe_bom_inventory",
-        "description": "Check recipe components and inventory SKU par levels for bottlenecks.",
-        "parameters": {
-            "type": "object",
-            "properties": {"branch_id": {"type": "integer"}},
-            "required": [],
-        },
+        "description": "Check recipe components and inventory par levels.",
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "get_branch_inventory",
-        "description": "Fetch all inventory SKUs, codes, and on-hand quantities for the branch.",
-        "parameters": {
-            "type": "object",
-            "properties": {"branch_id": {"type": "integer"}},
-            "required": [],
-        },
+        "description": "Fetch inventory SKUs and on-hand quantities.",
+        "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "get_payment_split_view",
-        "description": "View guest payment splits and settlement status for a table session.",
+        "description": "View payment splits for a table session.",
         "parameters": {
             "type": "object",
             "properties": {"table_session_id": {"type": "integer"}},
@@ -99,91 +74,61 @@ AVAILABLE_TOOLS_SCHEMA: list[dict[str, Any]] = [
     },
     {
         "name": "get_reservations",
-        "description": "List upcoming table reservations for the branch.",
-        "parameters": {
-            "type": "object",
-            "properties": {"branch_id": {"type": "integer"}},
-            "required": [],
-        },
+        "description": "List upcoming reservations for the actor's branch.",
+        "parameters": {"type": "object", "properties": {}},
     },
 ]
 
 
 def get_pruned_tool_schemas(actor: ActorContext) -> list[dict[str, Any]]:
-    """Return tool schemas filtered dynamically for the actor's authorized permissions."""
-    allowed = []
-    for schema in AVAILABLE_TOOLS_SCHEMA:
-        tool_name = schema["name"]
-        if can_execute_tool(actor, tool_name):
-            allowed.append(schema)
-    return allowed
+    return [schema for schema in AVAILABLE_TOOLS_SCHEMA if can_execute_tool(actor, schema["name"])]
 
 
 async def execute_tool_secured(
-    db: AsyncSession,
+    client: BackendRouteClient,
     actor: ActorContext,
     tool_name: str,
-    raw_args: dict[str, Any],
+    raw_args: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Validate permissions, inject branch/table scopes, execute tool, and record audit log."""
-    # 1. Permission check
+    """Execute a read tool through the backend route boundary."""
+    args = dict(raw_args or {})
     if not can_execute_tool(actor, tool_name):
-        error_msg = f"Actor role '{actor.role}' lacks permission to execute tool '{tool_name}'."
-        logger.warning(error_msg)
-        await record_audit(
-            db,
-            actor_role=actor.role,
-            event_type="AI_TOOL_UNAUTHORIZED_BLOCKED",
-            payload={"tool_name": tool_name, "raw_args": raw_args, "error": error_msg},
-            branch_id=actor.branch_id,
-        )
-        return {"error": error_msg, "status": "denied"}
+        return {"error": f"Permission denied for tool '{tool_name}'.", "status": "denied"}
+    if tool_name not in {schema["name"] for schema in AVAILABLE_TOOLS_SCHEMA}:
+        return {"error": f"Unknown tool '{tool_name}'.", "status": "failed"}
 
-    executor = TOOL_EXECUTORS.get(tool_name)
-    if not executor:
-        return {"error": f"Unknown tool '{tool_name}'", "status": "failed"}
+    branch_id = actor.branch_id
+    table_session_id = args.get("table_session_id")
+    if tool_name in {"get_table_session_state", "get_payment_split_view"} and not table_session_id:
+        table_session_id = actor.table_session_id
+    if tool_name in {"get_table_session_state", "get_payment_split_view"} and not table_session_id:
+        return {"error": "table_session_id is required", "status": "failed"}
 
-    # 2. Scope Injection (Override arguments with actor's enforced branch_id & org_id)
-    injected_args = dict(raw_args)
-    if "branch_id" in injected_args or tool_name in ("get_active_orders", "get_station_queues", "check_recipe_bom_inventory", "get_branch_inventory", "get_reservations"):
-        injected_args["branch_id"] = actor.branch_id
-
-    if actor.table_session_id and "table_session_id" not in injected_args:
-        injected_args["table_session_id"] = actor.table_session_id
-
-    # 3. Execution & Audit
     try:
-        if tool_name in ("get_table_session_state", "get_payment_split_view"):
-            ts_id = injected_args.get("table_session_id") or actor.table_session_id or 1
-            result = await executor(db, ts_id)
-        elif tool_name == "get_active_orders":
-            result = await executor(
-                db,
-                branch_id=actor.branch_id,
-                table_session_id=injected_args.get("table_session_id") or actor.table_session_id,
-            )
-        elif tool_name in ("get_station_queues", "check_recipe_bom_inventory", "get_branch_inventory"):
-            result = await executor(db, branch_id=actor.branch_id)
-        elif tool_name == "get_reservations":
-            result = await executor(db, branch_id=actor.branch_id)
-        else:
-            result = await executor(db, **injected_args)
+        context = await client.operational_context(
+            branch_id=branch_id,
+            table_session_id=int(table_session_id) if table_session_id else None,
+        )
+    except (BackendRouteError, TypeError, ValueError) as exc:
+        logger.warning("Route tool failed: %s", exc.__class__.__name__)
+        return {"error": "Backend tool request failed", "status": "error"}
 
-        await record_audit(
-            db,
-            actor_role=actor.role,
-            event_type="AI_TOOL_EXECUTION",
-            payload={"tool_name": tool_name, "injected_args": injected_args, "success": True},
-            branch_id=actor.branch_id,
-        )
-        return {"status": "success", "data": result}
-    except Exception as exc:
-        logger.error("Tool execution failed for %s: %s", tool_name, exc, exc_info=True)
-        await record_audit(
-            db,
-            actor_role=actor.role,
-            event_type="AI_TOOL_EXECUTION_ERROR",
-            payload={"tool_name": tool_name, "error": str(exc)},
-            branch_id=actor.branch_id,
-        )
-        return {"error": str(exc), "status": "error"}
+    key_by_tool = {
+        "get_table_session_state": "live_table_session",
+        "get_active_orders": "active_orders",
+        "get_station_queues": "station_queues",
+        "check_recipe_bom_inventory": "inventory_alerts",
+        "get_branch_inventory": "inventory_skus",
+        "get_payment_split_view": "payment_splits",
+        "get_reservations": "reservations",
+    }
+    return {"status": "success", "data": context.get(key_by_tool[tool_name])}
+
+
+__all__ = [
+    "AVAILABLE_TOOLS_SCHEMA",
+    "TOOL_PERMISSION_MAP",
+    "execute_tool_secured",
+    "get_pruned_tool_schemas",
+    "prune_tools_for_actor",
+]
